@@ -91,6 +91,20 @@ $done({});
 
 `underlying-proxy=DIRECT` 仅指定如何连接 SOCKS5 服务器，探针访问 OpenAI 时仍从该 SOCKS5 出口发出。脚本也会为未指定上游的 SOCKS5 描述符自动补上该参数。凭据只应保存在本机，不要写入模块、仓库、Issue 或日志。置空该存储键即可恢复到 `policy` 参数或 Surge 当前规则。
 
+如果 SOCKS5 服务要求先经过现有 Surge 策略才能连接，请在本机主配置的 `[Proxy]` 中创建命名链式策略，再把策略名写入同一个持久化键：
+
+```ini
+[Proxy]
+CSSS-Probe-SOCKS = socks5, proxy.example, 1080, username, password, underlying-proxy=YOUR_ENTRY_POLICY
+```
+
+```js
+$persistentStore.write("CSSS-Probe-SOCKS", "csss-probe-policy-descriptor-v1");
+$done({});
+```
+
+Surge 模块不能修改 `[Proxy]`，因此命名策略必须保存在本机主配置中。探针会优先使用持久化键指定的命名策略。
+
 采集探针建议使用轮换会话：代理用户名不要附加 `-sid-...-t-...`。固定 `sid` 会在会话周期内复用同一出口，若该出口只得到非 292 state，后续探针也可能重复相同结果。此建议只针对采集探针，不影响普通 Codex 流量的策略。
 
 ### 5. 打开状态面板

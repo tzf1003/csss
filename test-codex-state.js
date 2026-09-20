@@ -24,6 +24,9 @@ state.applyProbeRoute(chainedProbe, {}, {
   read: () => "socks5, proxy.example, 1080, user, pass, underlying-proxy=Entry"
 });
 assert.deepEqual(chainedProbe, {"policy-descriptor": "socks5, proxy.example, 1080, user, pass, underlying-proxy=Entry"});
+const namedProbe = {};
+assert.equal(state.applyProbeRoute(namedProbe, {}, {read: () => "CSSS-Probe-SOCKS"}), "policy");
+assert.deepEqual(namedProbe, {policy: "CSSS-Probe-SOCKS"});
 const fallbackProbe = {};
 assert.equal(state.applyProbeRoute(fallbackProbe, {policy: "fallback"}, {read: () => ""}), "policy");
 assert.deepEqual(fallbackProbe, {policy: "fallback"});

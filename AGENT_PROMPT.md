@@ -13,7 +13,7 @@
 2. 在 Surge 的模块设置中启用「Codex Sleep State Sugar」。
 3. 确认 Surge 的增强模式、脚本、MITM 已启用，并确认 chatgpt.com 与 api.openai.com 的 MITM 证书可用。
 4. 先确认是否有住宅 IP 策略：有则将住宅 IP 策略名 URL 编码后填入模块三处脚本参数的 `policy` 变量，并保持三处一致；没有住宅 IP 或变量置空/删除，则不要传入 `policy`，让 Surge 按当前规则选路。不要创建、猜测或输出任何账号、代理密码、订阅链接、Cookie、Authorization 或完整 turn-state。
-5. 如果用户明确提供探针专用 SOCKS5 地址和凭据，则仅在本机把 `socks5, host, port, username, password, underlying-proxy=DIRECT` 写入 Surge 持久化键 `csss-probe-policy-descriptor-v1`；未提供则跳过。采集使用轮换会话，代理用户名不要附加 `-sid-...-t-...`。该设置只影响 state 采集与续期探针。
+5. 如果用户明确提供探针专用 SOCKS5 地址和凭据：可直连时，仅在本机把 `socks5, host, port, username, password, underlying-proxy=DIRECT` 写入 Surge 持久化键 `csss-probe-policy-descriptor-v1`；若服务要求先经过现有 Surge 策略，则在本机主配置的 `[Proxy]` 中创建命名 SOCKS5 策略并设置 `underlying-proxy=住宅IP策略名`，再把该命名策略写入同一个持久化键。未提供则跳过。采集使用轮换会话，代理用户名不要附加 `-sid-...-t-...`。该设置只影响 state 采集与续期探针。
 6. 打开 macOS 菜单栏 Surge 图标 → 面板 →「Codex 292 状态」，确认面板可以显示当前是否会注入、TTL 和最近记录。
 7. 只做一次最小化验证：检查模块是否启用、配置是否生效、面板是否可打开。除非用户明确要求，不要自动发送模型测试请求。
 

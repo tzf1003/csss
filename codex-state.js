@@ -370,6 +370,10 @@ function applyProbeRoute(request, options, store) {
       : `${descriptor}, underlying-proxy=DIRECT`;
     return "SOCKS5";
   }
+  if (descriptor && descriptor.length <= 128) {
+    request.policy = descriptor;
+    return "policy";
+  }
   if (options.policy) {
     request.policy = options.policy;
     return "policy";
