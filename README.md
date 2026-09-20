@@ -79,6 +79,25 @@ policy=YOUR_RESIDENTIAL_IP_POLICY
 
 ### 4. 探针专用 SOCKS5（可选）
 
+获取 1024Proxy：
+
+- [1024Proxy 邀请链接](https://api.1024proxy.com/share/qu34nfxgf)
+- [1024Proxy 账密认证说明](https://help.1024proxy.com/1024/1024proxy/unlimited-residential-traffic-port/username-and-password-authentication)
+
+在 1024Proxy 控制台选择 SOCKS5、地区和会话类型后生成代理。控制台通常会给出类似下面的 cURL 命令：
+
+```bash
+curl --socks5 HOST:PORT -U "USERNAME-region-US:PASSWORD" https://ipinfo.io
+```
+
+其中 `HOST`、`PORT`、`USERNAME-region-US`、`PASSWORD` 分别对应 Surge 描述符中的四个字段。先运行该命令；能够返回出口 IP 后，再转换为：
+
+```text
+socks5, HOST, PORT, USERNAME-region-US, PASSWORD, underlying-proxy=DIRECT
+```
+
+如果控制台提供的是 `socks5://USERNAME:PASSWORD@HOST:PORT` 链接，同样按用户名、密码、主机和端口四部分填入。`-region-US` 用于选择美国出口；其他地区替换为相应的两位国家代码。
+
 如果只希望采集和续期 state 的探针走独立 SOCKS5，可在 Surge 脚本编辑器中执行下面的本机配置；普通 Codex 请求仍按原规则选路：
 
 ```js
