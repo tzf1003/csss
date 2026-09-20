@@ -18,15 +18,30 @@ const routedProbe = {};
 assert.equal(state.applyProbeRoute(routedProbe, {policy: "fallback"}, {
   read: () => "socks5, proxy.example, 1080, user, pass"
 }), "SOCKS5");
-assert.deepEqual(routedProbe, {"policy-descriptor": "socks5, proxy.example, 1080, user, pass, underlying-proxy=DIRECT"});
+assert.match(routedProbe["policy-descriptor"], /^CSSS-[A-Za-z0-9]+ = socks5, proxy\.example, 1080, user, pass, underlying-proxy=DIRECT$/);
 const chainedProbe = {};
 state.applyProbeRoute(chainedProbe, {}, {
   read: () => "socks5, proxy.example, 1080, user, pass, underlying-proxy=Entry"
 });
-assert.deepEqual(chainedProbe, {"policy-descriptor": "socks5, proxy.example, 1080, user, pass, underlying-proxy=Entry"});
+assert.match(chainedProbe["policy-descriptor"], /^CSSS-[A-Za-z0-9]+ = socks5, proxy\.example, 1080, user, pass, underlying-proxy=Entry$/);
+assert.equal(
+  state.freshProbeDescriptor("socks5, us.1024proxy.io, 3000, user-region-US-sid-old-t-5, pass, underlying-proxy=Entry", "abc-123"),
+  "CSSS-abc123 = socks5, us.1024proxy.io, 3000, user-region-US-sid-CSSSabc123-t-1, pass, underlying-proxy=Entry"
+);
 const namedProbe = {};
 assert.equal(state.applyProbeRoute(namedProbe, {}, {read: () => "CSSS-Probe-SOCKS"}), "policy");
 assert.deepEqual(namedProbe, {policy: "CSSS-Probe-SOCKS"});
+const routeStore = {
+  values: {"csss-probe-policy-descriptor-v1": "Probe-01|Probe-02"},
+  read(key) { return this.values[key]; },
+  write(value, key) { this.values[key] = value; }
+};
+const firstRotatingProbe = {};
+const secondRotatingProbe = {};
+state.applyProbeRoute(firstRotatingProbe, {}, routeStore);
+state.applyProbeRoute(secondRotatingProbe, {}, routeStore);
+assert.deepEqual(firstRotatingProbe, {policy: "Probe-01"});
+assert.deepEqual(secondRotatingProbe, {policy: "Probe-02"});
 const fallbackProbe = {};
 assert.equal(state.applyProbeRoute(fallbackProbe, {policy: "fallback"}, {read: () => ""}), "policy");
 assert.deepEqual(fallbackProbe, {policy: "fallback"});
@@ -61,6 +76,10 @@ assert.equal(state.handlesModel({"x-codex-routing-hint": "model=gpt-6-astra"}, o
 assert.equal(state.handlesModel({"x-codex-routing-hint": "model=gpt-daybreak-blue-latest"}, options), false);
 assert.equal(state.streamCompleted("event: response.completed\ndata: {}"), true);
 assert.equal(state.streamCompleted("event: response.failed"), false);
+assert.equal(state.probeRetryDelay(200, {blocks: 11}, {}, options), 30);
+assert.equal(state.probeRetryDelay(429, undefined, {"Retry-After": "600"}, options), 600);
+assert.equal(state.probeRetryDelay(403, undefined, {}, options), 3600);
+assert.equal(state.probeRetryDelay(0, undefined, {}, options), 30);
 
 const context = state.requestContext({
   "thread-id": "00000000-0000-0000-0000-12345678abcd",

@@ -1,6 +1,7 @@
 const STORE_KEY = "codex-turn-state-v5";
 const PROBE_HEADER = "x-codex-state-probe";
 const PROBE_POLICY_KEY = "csss-probe-policy-descriptor-v1";
+const PROBE_POLICY_CURSOR_KEY = "csss-probe-policy-cursor-v1";
 
 function getHeader(headers, name) {
   const wanted = name.toLowerCase();
@@ -332,6 +333,7 @@ function copyProbeHeaders(source) {
   }
   result["content-type"] = "application/json";
   result.accept = "text/event-stream";
+  result.connection = "close";
   result[PROBE_HEADER] = "1";
   return result;
 }
@@ -362,12 +364,39 @@ function retryDelay(headers, fallback) {
   return Number.isFinite(seconds) && seconds > 0 ? Math.max(fallback, seconds) : fallback;
 }
 
+function probeRetryDelay(status, observed, headers, options) {
+  if (status === 401 || status === 403) return options.ttl;
+  if (status === 429) return retryDelay(headers, options.cooldown);
+  if (!status || (status === 200 && observed)) return Math.min(options.cooldown, 30);
+  return options.cooldown;
+}
+
+function freshProbeDescriptor(descriptor, nonce) {
+  const named = String(descriptor).match(/^[^,=]{1,128}\s*=\s*(socks5(?:-tls)?,.*)$/i);
+  const parts = String(named ? named[1] : descriptor).split(",").map(value => value.trim());
+  const id = String(nonce || (Date.now().toString(36) + Math.random().toString(36).slice(2, 8)))
+    .replace(/[^A-Za-z0-9]/g, "").slice(-24) || "0";
+  if (/^socks5(?:-tls)?$/i.test(parts[0]) && /(?:^|\.)1024proxy\.io$/i.test(parts[1]) && parts[3] && !parts[3].includes("=")) {
+    parts[3] = parts[3].replace(/-sid-.+?-t-\d+$/i, "") + `-sid-CSSS${id}-t-1`;
+  }
+  return `CSSS-${id} = ${parts.join(", ")}`;
+}
+
 function applyProbeRoute(request, options, store) {
   const descriptor = String(store && store.read(PROBE_POLICY_KEY) || "").trim();
+  const policies = descriptor.split("|").map(value => value.trim()).filter(Boolean);
+  if (policies.length > 1 && descriptor.length <= 2048 && policies.every(value => value.length <= 128)) {
+    let cursor = Number(store && store.read(PROBE_POLICY_CURSOR_KEY));
+    if (!Number.isSafeInteger(cursor) || cursor < 0) cursor = 0;
+    request.policy = policies[cursor % policies.length];
+    if (store && typeof store.write === "function") store.write(String((cursor + 1) % policies.length), PROBE_POLICY_CURSOR_KEY);
+    return "policy";
+  }
   if (descriptor.length <= 2048 && /^socks5(?:-tls)?,/i.test(descriptor)) {
-    request["policy-descriptor"] = /(?:^|,)\s*underlying-proxy\s*=/i.test(descriptor)
+    const routed = /(?:^|,)\s*underlying-proxy\s*=/i.test(descriptor)
       ? descriptor
       : `${descriptor}, underlying-proxy=DIRECT`;
+    request["policy-descriptor"] = freshProbeDescriptor(routed);
     return "SOCKS5";
   }
   if (descriptor && descriptor.length <= 128) {
@@ -434,8 +463,7 @@ function renew(url, requestHeaders, options, key, callback) {
     }
 
     old.probeUntil = 0;
-    if (status === 401 || status === 403) old.nextProbeAt = finishedAt + options.ttl;
-    if (status === 429) old.nextProbeAt = finishedAt + retryDelay(response.headers, options.cooldown);
+    old.nextProbeAt = finishedAt + probeRetryDelay(status, observed, response && response.headers, options);
     latest.entries[key] = old;
     writeStore(latest);
     console.log("[renew] rejected status=" + (status || "network") + " state_len=" + (state ? state.length : 0));
@@ -554,6 +582,7 @@ if (typeof module !== "undefined") {
     entryKey,
     extractState,
     formatTime,
+    freshProbeDescriptor,
     getHeader,
     handlesModel,
     historyLine,
@@ -562,6 +591,7 @@ if (typeof module !== "undefined") {
     panelView,
     parseOptions,
     parseState,
+    probeRetryDelay,
     requestContext,
     setHeader,
     shouldRenew,
