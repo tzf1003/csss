@@ -12,8 +12,12 @@ const now = 1900000000;
 const valid = token(10, now);
 const rejectedShape = token(11, now);
 const options = state.parseOptions("model=gpt-6-astra&ttl=3600&renew=600&cooldown=300");
+const allOptions = state.parseOptions("model=*&ttl=3600&renew=600&cooldown=300");
 
 assert.equal(options.policy, "");
+assert.equal(state.parseOptions("").model, "*");
+assert.equal(options.retryBase, 2);
+assert.equal(options.retryMax, 60);
 const routedProbe = {};
 assert.equal(state.applyProbeRoute(routedProbe, {policy: "fallback"}, {
   read: () => "socks5, proxy.example, 1080, user, pass"
@@ -54,7 +58,7 @@ assert.equal(state.acceptState(rejectedShape, options, now), undefined);
 assert.equal(state.acceptState(token(10, now - 3600), options, now), undefined);
 assert.equal(state.parseState("not-a-state"), undefined);
 
-const entry = state.makeEntry(state.acceptState(valid, options, now), options, now);
+const entry = state.makeEntry(state.acceptState(valid, options, now), options, now, "gpt-6-astra");
 assert.equal(entry.refreshAt, now + 3000);
 assert.equal(entry.expiresAt, now + 3570);
 assert.equal(state.shouldRenew(entry, now + 2999), false);
@@ -71,15 +75,40 @@ assert.deepEqual(
 );
 assert.equal(state.extractState({"X-Codex-Turn-State": valid}), valid);
 assert.equal(state.entryKey({"chatgpt-account-id": "fixture-account"}, options), "fixture-account\u0000gpt-6-astra");
+assert.equal(state.entryKey({"chatgpt-account-id": "fixture-account"}, allOptions, "gpt-6-sol"), "fixture-account\u0000gpt-6-sol");
 assert.equal(state.modelFromHeaders({"x-codex-routing-hint": "model=gpt-6-astra"}), "gpt-6-astra");
+assert.equal(state.modelFromBody('{"model":"gpt-6-sol"}'), "gpt-6-sol");
+assert.equal(state.requestModel({}, '{"model":"gpt-daybreak-blue-latest"}', allOptions), "gpt-daybreak-blue-latest");
 assert.equal(state.handlesModel({"x-codex-routing-hint": "model=gpt-6-astra"}, options), true);
 assert.equal(state.handlesModel({"x-codex-routing-hint": "model=gpt-daybreak-blue-latest"}, options), false);
+assert.equal(state.handlesModel({}, allOptions, '{"model":"gpt-6-sol"}'), true);
+assert.equal(state.handlesModel({}, allOptions, ""), false);
+assert.deepEqual(JSON.parse(state.probeBody("gpt-6-sol")), {
+  model: "gpt-6-sol",
+  input: "Reply with OK.",
+  stream: true,
+  store: false
+});
 assert.equal(state.streamCompleted("event: response.completed\ndata: {}"), true);
 assert.equal(state.streamCompleted("event: response.failed"), false);
 assert.equal(state.probeRetryDelay(200, {blocks: 11}, {}, options), 30);
 assert.equal(state.probeRetryDelay(429, undefined, {"Retry-After": "600"}, options), 600);
 assert.equal(state.probeRetryDelay(403, undefined, {}, options), 3600);
 assert.equal(state.probeRetryDelay(0, undefined, {}, options), 30);
+assert.equal(state.retryAfterSeconds({"Retry-After": "12"}, now), 12);
+assert.equal(state.retryAfterSeconds({"Retry-After": new Date((now + 15) * 1000).toUTCString()}, now), 15);
+const rateStore = {rateLimits: {}};
+const rateHeaders = {"chatgpt-account-id": "fixture-account"};
+assert.deepEqual(state.markRateLimit(rateStore, rateHeaders, {}, options, now), {delay: 2, failures: 1, retryAfter: 2});
+assert.equal(state.backoffWait(rateStore, rateHeaders, now), 2);
+assert.deepEqual(state.markRateLimit(rateStore, rateHeaders, {"retry-after": "10"}, options, now + 2), {delay: 10, failures: 2, retryAfter: 10});
+assert.equal(state.backoffWait(rateStore, rateHeaders, now + 2), 10);
+assert.equal(state.accountProbeActive({entries: {
+  ["fixture-account\u0000gpt-6-astra"]: {probeUntil: now + 20}
+}}, rateHeaders, "fixture-account\u0000gpt-6-sol", now), true);
+assert.equal(state.accountProbeActive({entries: {
+  ["other-account\u0000gpt-6-astra"]: {probeUntil: now + 20}
+}}, rateHeaders, "fixture-account\u0000gpt-6-sol", now), false);
 
 const context = state.requestContext({
   "thread-id": "00000000-0000-0000-0000-12345678abcd",
@@ -97,13 +126,16 @@ entry.nextProbeAt = now + 90;
 const activePanel = state.panelView({
   entries: {test: entry},
   history: [{id: "request", type: "request", at: now, injected: true, thread: "5678abcd", responseLength: 312}],
+  rateLimits: {test: {until: now + 10, failures: 2}},
   lastProbe: {at: now, status: 200, stateLength: 312, accepted: false}
 }, options, now);
 assert.equal(activePanel.title, "Codex 292：正在复用");
 assert.equal(activePanel.style, "good");
 assert.match(activePanel.content, /现在发送：会注入 292/);
+assert.match(activePanel.content, /模型：gpt-6-astra/);
 assert.match(activePanel.content, /续期：上次未通过，1 分 30 秒后重试/);
 assert.match(activePanel.content, /最近续期：HTTP 200／state 312 未通过；继续复用缓存 292/);
+assert.match(activePanel.content, /429 退避：10 秒／连续 2 次/);
 assert.match(activePanel.content, /已注入 292.*响应 312/);
 
 console.log("codex-state self-check passed");

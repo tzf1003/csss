@@ -23,12 +23,14 @@ function setHeader(headers, name, value) {
 function parseOptions(raw) {
   const result = {
     policy: "",
-    model: "gpt-6-astra",
+    model: "*",
     blocks: 10,
     ttl: 3600,
     renew: 600,
     cooldown: 300,
     probeTimeout: 20,
+    retryBase: 2,
+    retryMax: 60,
     forceHttp: true
   };
   for (const part of String(raw || "").split("&")) {
@@ -43,9 +45,12 @@ function parseOptions(raw) {
     if (key === "renew" && Number(value) >= 30) result.renew = Number(value);
     if (key === "cooldown" && Number(value) >= 30) result.cooldown = Number(value);
     if (key === "timeout" && Number(value) > 0) result.probeTimeout = Number(value);
+    if (key === "retry_base" && Number(value) >= 1) result.retryBase = Number(value);
+    if (key === "retry_max" && Number(value) >= result.retryBase) result.retryMax = Number(value);
     if (key === "force_http") result.forceHttp = value !== "0" && value !== "false";
   }
   if (result.renew >= result.ttl) result.renew = Math.max(30, Math.floor(result.ttl / 3));
+  if (result.retryMax < result.retryBase) result.retryMax = result.retryBase;
   return result;
 }
 
@@ -119,7 +124,7 @@ function extractState(headers) {
 }
 
 function emptyStore() {
-  return {entries: {}, flows: {}, history: [], lastProbe: null};
+  return {entries: {}, flows: {}, history: [], rateLimits: {}, lastProbe: null};
 }
 
 function readStore() {
@@ -129,6 +134,7 @@ function readStore() {
       entries: parsed && parsed.entries ? parsed.entries : {},
       flows: parsed && parsed.flows ? parsed.flows : {},
       history: parsed && Array.isArray(parsed.history) ? parsed.history : [],
+      rateLimits: parsed && parsed.rateLimits ? parsed.rateLimits : {},
       lastProbe: parsed && parsed.lastProbe ? parsed.lastProbe : null
     };
   } catch (_) {
@@ -144,21 +150,43 @@ function accountKey(headers) {
   return String(getHeader(headers, "chatgpt-account-id") || "default");
 }
 
+function normalizeModel(value) {
+  value = String(value || "").trim();
+  return /^[A-Za-z0-9._:\/-]{1,128}$/.test(value) ? value : "";
+}
+
 function modelFromHeaders(headers) {
   const direct = getHeader(headers, "x-codex-model");
-  if (direct) return String(direct);
+  if (direct) return normalizeModel(direct);
   const hint = String(getHeader(headers, "x-codex-routing-hint") || "");
   const match = hint.match(/(?:^|[;,\s])model=([^;,\s]+)/i);
-  return match ? match[1] : "";
+  return match ? normalizeModel(match[1]) : "";
 }
 
-function handlesModel(headers, options) {
-  const model = modelFromHeaders(headers);
-  return !model || model === options.model;
+function modelFromBody(body) {
+  if (typeof body !== "string" || !body || body.length > 1048576) return "";
+  try {
+    return normalizeModel(JSON.parse(body).model);
+  } catch (_) {
+    return "";
+  }
 }
 
-function entryKey(headers, options) {
-  return accountKey(headers) + "\u0000" + options.model;
+function allModels(options) {
+  return options.model === "*" || String(options.model).toLowerCase() === "all";
+}
+
+function requestModel(headers, body, options) {
+  return modelFromHeaders(headers) || modelFromBody(body) || (allModels(options) ? "" : normalizeModel(options.model));
+}
+
+function handlesModel(headers, options, body) {
+  const model = modelFromHeaders(headers) || modelFromBody(body);
+  return model ? allModels(options) || model === options.model : !allModels(options);
+}
+
+function entryKey(headers, options, model) {
+  return accountKey(headers) + "\u0000" + (normalizeModel(model) || requestModel(headers, "", options));
 }
 
 function usable(entry, now) {
@@ -169,8 +197,9 @@ function shouldRenew(entry, now) {
   return !usable(entry, now) || entry.refreshAt <= now;
 }
 
-function makeEntry(token, options, now) {
+function makeEntry(token, options, now, model) {
   return {
+    model,
     value: token.value,
     fingerprint: token.fingerprint,
     blocks: token.blocks,
@@ -223,18 +252,19 @@ function updateHistory(store, id, fields) {
   }
 }
 
-function recordFlow(id, key, entry, injected, now, headers) {
+function recordFlow(id, key, model, entry, injected, now, headers) {
   if (!id) return;
   const store = readStore();
   cleanFlows(store, now);
   store.flows[id] = {
     key,
+    model,
     injected,
     fingerprint: entry ? entry.fingerprint : "",
     createdAt: now
   };
   const context = requestContext(headers);
-  addHistory(store, {id, type: "request", at: now, injected, thread: context.thread, turn: context.turn});
+  addHistory(store, {id, type: "request", at: now, model, injected, thread: context.thread, turn: context.turn});
   const active = store.entries[key];
   if (injected && active && active.fingerprint === entry.fingerprint) {
     active.lastInjectedAt = now;
@@ -257,9 +287,10 @@ function duration(seconds) {
   return Math.floor(seconds / 60) + " 分 " + (seconds % 60) + " 秒";
 }
 
-function latestEntry(store) {
+function latestEntry(store, now) {
   const entries = Object.values(store.entries || {});
-  return entries.sort((left, right) => (right.acquiredAt || 0) - (left.acquiredAt || 0))[0];
+  return entries.sort((left, right) => Number(usable(right, now)) - Number(usable(left, now)) ||
+    (right.acquiredAt || 0) - (left.acquiredAt || 0))[0];
 }
 
 function historyLine(event) {
@@ -268,14 +299,16 @@ function historyLine(event) {
     label = event.accepted ? "✅ 探针抓到 292" : "⚪ 探针未通过 " + (event.stateLength || 0);
   } else {
     label = event.injected ? "✅ 已注入 292" : "⚪ 未注入";
+    if (event.responseStatus === 429) label += " → 429，退避 " + duration(event.rateLimitDelay);
     if (event.responseLength) label += " → 响应 " + event.responseLength;
     if (event.captured) label += "／已抓到 292";
   }
-  return formatTime(event.at) + "  " + label + (event.thread && event.thread !== "-" ? "  会话…" + event.thread : "");
+  return formatTime(event.at) + "  " + label + (event.model ? "  " + event.model : "") +
+    (event.thread && event.thread !== "-" ? "  会话…" + event.thread : "");
 }
 
 function panelView(store, options, now) {
-  const entry = latestEntry(store);
+  const entry = latestEntry(store, now);
   const active = usable(entry, now);
   const probing = !!(entry && entry.probeUntil > now);
   const cooling = !!(entry && entry.nextProbeAt > now);
@@ -287,6 +320,7 @@ function panelView(store, options, now) {
     title = "Codex 292：正在复用";
     style = "good";
     lines.push("现在发送：会注入 292");
+    if (entry.model) lines.push("模型：" + entry.model);
     lines.push("TTL 剩余：" + duration(entry.expiresAt - now));
     if (entry.refreshAt > now) lines.push("距离续期：" + duration(entry.refreshAt - now));
     else if (probing) lines.push("续期：正在尝试，完成后再发送");
@@ -303,11 +337,16 @@ function panelView(store, options, now) {
   }
 
   if (store.lastProbe) {
-    const rejectedRenewal = active && store.lastProbe.accepted === false && store.lastProbe.at >= entry.acquiredAt;
+    const sameModel = !entry || !entry.model || !store.lastProbe.model || entry.model === store.lastProbe.model;
+    const rejectedRenewal = active && sameModel && store.lastProbe.accepted === false && store.lastProbe.at >= entry.acquiredAt;
     const probe = "HTTP " + (store.lastProbe.status || "-") + "／state " + (store.lastProbe.stateLength || 0);
     lines.push(rejectedRenewal
       ? "最近续期：" + probe + " 未通过；继续复用缓存 292／" + formatTime(store.lastProbe.at)
-      : "最近探针：" + probe + "／" + formatTime(store.lastProbe.at));
+      : "最近探针：" + probe + (store.lastProbe.model ? "／" + store.lastProbe.model : "") + "／" + formatTime(store.lastProbe.at));
+  }
+  const rateLimit = Object.values(store.rateLimits || {}).sort((left, right) => (right.until || 0) - (left.until || 0))[0];
+  if (rateLimit && rateLimit.until > now) {
+    lines.push("429 退避：" + duration(rateLimit.until - now) + "／连续 " + (rateLimit.failures || 1) + " 次");
   }
   const history = (store.history || []).slice(-6).reverse();
   if (history.length) {
@@ -341,16 +380,9 @@ function copyProbeHeaders(source) {
 function probeBody(model) {
   return JSON.stringify({
     model,
-    instructions: "Reply with OK.",
-    input: [{
-      type: "message",
-      role: "user",
-      content: [{type: "input_text", text: "Reply with OK."}]
-    }],
+    input: "Reply with OK.",
     stream: true,
-    store: false,
-    parallel_tool_calls: true,
-    include: ["reasoning.encrypted_content"]
+    store: false
   });
 }
 
@@ -359,9 +391,38 @@ function streamCompleted(body) {
     (/event:\s*response\.completed/.test(body) || /"type"\s*:\s*"response\.completed"/.test(body));
 }
 
-function retryDelay(headers, fallback) {
-  const seconds = Number(getHeader(headers, "retry-after"));
-  return Number.isFinite(seconds) && seconds > 0 ? Math.max(fallback, seconds) : fallback;
+function retryAfterSeconds(headers, now) {
+  const value = String(getHeader(headers, "retry-after") || "").trim();
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds);
+  const date = Date.parse(value);
+  return Number.isFinite(date) && date > now * 1000 ? Math.ceil(date / 1000 - now) : 0;
+}
+
+function retryDelay(headers, fallback, now) {
+  return Math.max(fallback, retryAfterSeconds(headers, now || Math.floor(Date.now() / 1000)));
+}
+
+function markRateLimit(store, headers, responseHeaders, options, now, model) {
+  const key = accountKey(headers);
+  const previous = store.rateLimits[key] || {};
+  const failures = Math.min(16, (previous.failures || 0) + 1);
+  const exponential = Math.min(options.retryMax, options.retryBase * Math.pow(2, failures - 1));
+  const serverDelay = retryAfterSeconds(responseHeaders, now);
+  const delay = Math.min(options.retryMax, Math.max(exponential, serverDelay));
+  store.rateLimits[key] = {model, failures, until: now + delay, updatedAt: now};
+  return {delay, failures, retryAfter: Math.max(delay, serverDelay)};
+}
+
+function clearRateLimit(store, headers, model) {
+  const key = accountKey(headers);
+  const record = store.rateLimits[key];
+  if (!record || !record.model || !model || record.model === model) delete store.rateLimits[key];
+}
+
+function backoffWait(store, headers, now) {
+  const record = (store.rateLimits || {})[accountKey(headers)];
+  return record && record.until > now ? Math.ceil(record.until - now) : 0;
 }
 
 function probeRetryDelay(status, observed, headers, options) {
@@ -410,7 +471,7 @@ function applyProbeRoute(request, options, store) {
   return "rules";
 }
 
-function renew(url, requestHeaders, options, key, callback) {
+function renew(url, requestHeaders, options, key, model, callback) {
   const now = Math.floor(Date.now() / 1000);
   const store = readStore();
   const current = store.entries[key] || {};
@@ -427,7 +488,7 @@ function renew(url, requestHeaders, options, key, callback) {
   const request = {
     url,
     headers: copyProbeHeaders(requestHeaders),
-    body: probeBody(options.model),
+    body: probeBody(model),
     timeout: options.probeTimeout,
     "auto-redirect": false,
     "auto-cookie": false
@@ -442,17 +503,20 @@ function renew(url, requestHeaders, options, key, callback) {
     const state = !error && response ? extractState(response.headers) : undefined;
     const token = status === 200 && streamCompleted(body) ? acceptState(state, options, finishedAt) : undefined;
     const observed = parseState(state);
+    if (status === 429) markRateLimit(latest, requestHeaders, response.headers, options, finishedAt, model);
+    else if (status >= 200 && status < 300) clearRateLimit(latest, requestHeaders, model);
     latest.lastProbe = {
       at: finishedAt,
+      model,
       status: status || 0,
       stateLength: state ? state.length : 0,
       blocks: observed ? observed.blocks : 0,
       accepted: !!token
     };
-    addHistory(latest, {type: "probe", at: finishedAt, status: status || 0, stateLength: state ? state.length : 0, accepted: !!token});
+    addHistory(latest, {type: "probe", at: finishedAt, model, status: status || 0, stateLength: state ? state.length : 0, accepted: !!token});
 
     if (token) {
-      latest.entries[key] = makeEntry(token, options, finishedAt);
+      latest.entries[key] = makeEntry(token, options, finishedAt, model);
       writeStore(latest);
       if (typeof $notification !== "undefined") {
         $notification.post("Codex 292 已采集", "开始跨会话复用", "TTL 60 分钟，50 分钟后自动续期", {"auto-dismiss": true});
@@ -471,10 +535,10 @@ function renew(url, requestHeaders, options, key, callback) {
   });
 }
 
-function finishRequest(headers, key, entry) {
+function finishRequest(headers, key, model, entry) {
   const now = Math.floor(Date.now() / 1000);
   const injected = usable(entry, now);
-  recordFlow($request.id, key, entry, injected, now, headers);
+  recordFlow($request.id, key, model, entry, injected, now, headers);
   if (injected) {
     console.log("[request] state injected len=" + entry.length + " expires_in=" + (entry.expiresAt - now));
     $done({headers: setHeader(headers, "x-codex-turn-state", entry.value)});
@@ -484,33 +548,64 @@ function finishRequest(headers, key, entry) {
   }
 }
 
+function finishWithBackoff(headers, key, model, entry) {
+  const now = Math.floor(Date.now() / 1000);
+  const wait = backoffWait(readStore(), headers, now);
+  if (!wait) {
+    finishRequest(headers, key, model, entry);
+    return;
+  }
+  console.log("[429] holding client retry for " + wait + "s model=" + model);
+  setTimeout(() => finishRequest(headers, key, model, readStore().entries[key]), wait * 1000);
+}
+
+function accountProbeActive(store, headers, key, now) {
+  const prefix = accountKey(headers) + "\u0000";
+  return Object.keys(store.entries || {}).some(candidate => candidate !== key && candidate.startsWith(prefix) &&
+    store.entries[candidate] && store.entries[candidate].probeUntil > now);
+}
+
 function handleRequest(options) {
   const headers = $request.headers || {};
   if (getHeader(headers, PROBE_HEADER) === "1") {
     $done({});
     return;
   }
-  if (!handlesModel(headers, options)) {
-    $done({});
-    return;
-  }
-  if (options.forceHttp && /websocket/i.test(String(getHeader(headers, "upgrade") || ""))) {
+  const body = typeof $request.body === "string" ? $request.body : "";
+  const model = requestModel(headers, body, options);
+  const matches = handlesModel(headers, options, body);
+  if (options.forceHttp && /websocket/i.test(String(getHeader(headers, "upgrade") || "")) && (matches || allModels(options))) {
     console.log("[transport] websocket blocked; waiting for HTTP fallback");
     $done({abort: true});
     return;
   }
-
-  const key = entryKey(headers, options);
-  const entry = readStore().entries[key];
-  const now = Math.floor(Date.now() / 1000);
-  if (!shouldRenew(entry, now)) {
-    finishRequest(headers, key, entry);
+  if (!matches || !model) {
+    console.log("[request] model not detected or excluded; request passed through");
+    $done({});
     return;
   }
 
-  renew($request.url, headers, options, key, (_, renewed) => {
+  const key = entryKey(headers, options, model);
+  const store = readStore();
+  const entry = store.entries[key];
+  const now = Math.floor(Date.now() / 1000);
+  if (backoffWait(store, headers, now) > 0) {
+    finishWithBackoff(headers, key, model, entry);
+    return;
+  }
+  if (accountProbeActive(store, headers, key, now)) {
+    console.log("[renew] another model probe is active; request passed through");
+    finishRequest(headers, key, model, entry);
+    return;
+  }
+  if (!shouldRenew(entry, now)) {
+    finishRequest(headers, key, model, entry);
+    return;
+  }
+
+  renew($request.url, headers, options, key, model, (_, renewed) => {
     const selected = usable(renewed, Math.floor(Date.now() / 1000)) ? renewed : entry;
-    finishRequest(headers, key, selected);
+    finishWithBackoff(headers, key, model, selected);
   });
 }
 
@@ -520,31 +615,44 @@ function handleResponse(options) {
     $done({});
     return;
   }
-  if (!handlesModel(requestHeaders, options)) {
-    $done({});
-    return;
-  }
-
   const now = Math.floor(Date.now() / 1000);
   const store = readStore();
   cleanFlows(store, now);
   const flow = store.flows[$request.id];
   if ($request.id) delete store.flows[$request.id];
-  const key = flow ? flow.key : entryKey(requestHeaders, options);
+  const body = typeof $request.body === "string" ? $request.body : "";
+  const model = flow && flow.model || requestModel(requestHeaders, body, options);
+  const status = Number($response.status);
+  let rewrittenHeaders;
+  let rateLimit;
+  if (status === 429) {
+    rateLimit = markRateLimit(store, requestHeaders, $response.headers, options, now, model);
+    rewrittenHeaders = setHeader($response.headers || {}, "retry-after", String(rateLimit.retryAfter));
+    console.log("[429] backoff=" + rateLimit.delay + "s failures=" + rateLimit.failures);
+  } else if (status >= 200 && status < 300) {
+    clearRateLimit(store, requestHeaders, model);
+  }
+  if (!model || !(allModels(options) || model === options.model)) {
+    writeStore(store);
+    $done(rewrittenHeaders ? {headers: rewrittenHeaders} : {});
+    return;
+  }
+  const key = flow ? flow.key : entryKey(requestHeaders, options, model);
   const current = store.entries[key];
   const state = extractState($response.headers);
-  const token = Number($response.status) === 200 ? acceptState(state, options, now) : undefined;
+  const token = status === 200 ? acceptState(state, options, now) : undefined;
   const observed = parseState(state);
   updateHistory(store, $request.id, {
     responseAt: now,
-    responseStatus: Number($response.status),
+    responseStatus: status,
     responseLength: state ? state.length : 0,
-    responseBlocks: observed ? observed.blocks : 0
+    responseBlocks: observed ? observed.blocks : 0,
+    rateLimitDelay: rateLimit ? rateLimit.delay : 0
   });
 
   if (!flow || !flow.injected) {
     if (token) {
-      store.entries[key] = makeEntry(token, options, now);
+      store.entries[key] = makeEntry(token, options, now, model);
       updateHistory(store, $request.id, {captured: true});
       if (typeof $notification !== "undefined") {
         $notification.post("Codex 292 已采集", "开始跨会话复用", "TTL 60 分钟，50 分钟后自动续期", {"auto-dismiss": true});
@@ -559,7 +667,7 @@ function handleResponse(options) {
   }
 
   writeStore(store);
-  $done({});
+  $done(rewrittenHeaders ? {headers: rewrittenHeaders} : {});
 }
 
 function handlePanel(options) {
@@ -578,6 +686,8 @@ if (typeof module !== "undefined") {
     applyProbeRoute,
     acceptState,
     accountKey,
+    accountProbeActive,
+    backoffWait,
     decodeBase64Url,
     entryKey,
     extractState,
@@ -587,12 +697,17 @@ if (typeof module !== "undefined") {
     handlesModel,
     historyLine,
     makeEntry,
+    markRateLimit,
+    modelFromBody,
     modelFromHeaders,
     panelView,
     parseOptions,
     parseState,
     probeRetryDelay,
+    probeBody,
+    requestModel,
     requestContext,
+    retryAfterSeconds,
     setHeader,
     shouldRenew,
     streamCompleted,
