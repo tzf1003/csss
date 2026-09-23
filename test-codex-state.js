@@ -85,7 +85,12 @@ assert.equal(state.handlesModel({}, allOptions, '{"model":"gpt-6-sol"}'), true);
 assert.equal(state.handlesModel({}, allOptions, ""), false);
 assert.deepEqual(JSON.parse(state.probeBody("gpt-6-sol")), {
   model: "gpt-6-sol",
-  input: "Reply with OK.",
+  instructions: "Reply with OK.",
+  input: [{
+    type: "message",
+    role: "user",
+    content: [{type: "input_text", text: "Reply with OK."}]
+  }],
   stream: true,
   store: false
 });

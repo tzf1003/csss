@@ -380,7 +380,12 @@ function copyProbeHeaders(source) {
 function probeBody(model) {
   return JSON.stringify({
     model,
-    input: "Reply with OK.",
+    instructions: "Reply with OK.",
+    input: [{
+      type: "message",
+      role: "user",
+      content: [{type: "input_text", text: "Reply with OK."}]
+    }],
     stream: true,
     store: false
   });
