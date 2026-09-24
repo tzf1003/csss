@@ -1,7 +1,8 @@
-const STORE_KEY = "codex-turn-state-v5";
+const STORE_KEY = "codex-turn-state-v6";
 const PROBE_HEADER = "x-codex-state-probe";
 const PROBE_POLICY_KEY = "csss-probe-policy-descriptor-v1";
 const PROBE_POLICY_CURSOR_KEY = "csss-probe-policy-cursor-v1";
+const QUALITY_PROMPT = "请回答：最新的 iPhone 型号是什么，禁止联网搜索，基于已有的知识回答。";
 
 function getHeader(headers, name) {
   const wanted = name.toLowerCase();
@@ -25,10 +26,11 @@ function parseOptions(raw) {
     policy: "",
     model: "*",
     blocks: 10,
-    ttl: 3600,
-    renew: 600,
+    ttl: 300,
+    renew: 60,
     cooldown: 300,
-    probeTimeout: 20,
+    probeTimeout: 25,
+    probeAttempts: 3,
     retryBase: 2,
     retryMax: 60,
     forceHttp: true
@@ -45,6 +47,9 @@ function parseOptions(raw) {
     if (key === "renew" && Number(value) >= 30) result.renew = Number(value);
     if (key === "cooldown" && Number(value) >= 30) result.cooldown = Number(value);
     if (key === "timeout" && Number(value) > 0) result.probeTimeout = Number(value);
+    if (key === "probe_attempts" && Number.isInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 8) {
+      result.probeAttempts = Number(value);
+    }
     if (key === "retry_base" && Number(value) >= 1) result.retryBase = Number(value);
     if (key === "retry_max" && Number(value) >= result.retryBase) result.retryMax = Number(value);
     if (key === "force_http") result.forceHttp = value !== "0" && value !== "false";
@@ -112,8 +117,14 @@ function parseState(value) {
 }
 
 function acceptState(value, options, now) {
-  const token = parseState(value);
+  const token = acceptFreshState(value, options, now);
   if (!token || token.blocks !== options.blocks) return undefined;
+  return token;
+}
+
+function acceptFreshState(value, options, now) {
+  const token = parseState(value);
+  if (!token) return undefined;
   if (token.issuedAt > now + 30 || now >= token.issuedAt + options.ttl - 30) return undefined;
   return token;
 }
@@ -197,7 +208,7 @@ function shouldRenew(entry, now) {
   return !usable(entry, now) || entry.refreshAt <= now;
 }
 
-function makeEntry(token, options, now, model) {
+function makeEntry(token, options, now, model, qualityTier) {
   return {
     model,
     value: token.value,
@@ -206,6 +217,7 @@ function makeEntry(token, options, now, model) {
     length: token.value.length,
     issuedAt: token.issuedAt,
     acquiredAt: now,
+    qualityTier: qualityTier || 0,
     refreshAt: token.issuedAt + options.ttl - options.renew,
     expiresAt: token.issuedAt + options.ttl - 30,
     nextProbeAt: 0,
@@ -296,12 +308,14 @@ function latestEntry(store, now) {
 function historyLine(event) {
   let label;
   if (event.type === "probe") {
-    label = event.accepted ? "✅ 探针抓到 292" : "⚪ 探针未通过 " + (event.stateLength || 0);
+    label = event.accepted
+      ? "✅ 质量票据已采集"
+      : "⚪ 探针未通过" + (event.qualityTier ? " iPhone " + event.qualityTier : "") +
+        "／state " + (event.stateLength || 0);
   } else {
-    label = event.injected ? "✅ 已注入 292" : "⚪ 未注入";
+    label = event.injected ? "✅ 已注入 state" : "⚠️ 未验证放行";
     if (event.responseStatus === 429) label += " → 429，退避 " + duration(event.rateLimitDelay);
     if (event.responseLength) label += " → 响应 " + event.responseLength;
-    if (event.captured) label += "／已抓到 292";
   }
   return formatTime(event.at) + "  " + label + (event.model ? "  " + event.model : "") +
     (event.thread && event.thread !== "-" ? "  会话…" + event.thread : "");
@@ -313,14 +327,15 @@ function panelView(store, options, now) {
   const probing = !!(entry && entry.probeUntil > now);
   const cooling = !!(entry && entry.nextProbeAt > now);
   const lines = [];
-  let title = "Codex 292：等待采集";
+  let title = "Codex State：等待采集";
   let style = "info";
 
   if (active) {
-    title = "Codex 292：正在复用";
+    title = "Codex State：正在复用";
     style = "good";
-    lines.push("现在发送：会注入 292");
+    lines.push("现在发送：会注入已验证 state（" + (entry.length || 0) + "）");
     if (entry.model) lines.push("模型：" + entry.model);
+    if (entry.qualityTier) lines.push("质量验证：iPhone " + entry.qualityTier);
     lines.push("TTL 剩余：" + duration(entry.expiresAt - now));
     if (entry.refreshAt > now) lines.push("距离续期：" + duration(entry.refreshAt - now));
     else if (probing) lines.push("续期：正在尝试，完成后再发送");
@@ -328,20 +343,23 @@ function panelView(store, options, now) {
     else lines.push("续期：发送前先尝试续期");
     lines.push("累计注入：" + (entry.injectionCount || 0) + " 次");
   } else if (probing) {
-    lines.push("现在发送：正在采集，尚无 292");
+    lines.push("现在发送：正在质量采集，正式请求等待中");
   } else if (cooling) {
-    lines.push("现在发送：不会注入");
+    lines.push("现在发送：未验证放行");
     lines.push("探针冷却：" + duration(entry.nextProbeAt - now));
   } else {
-    lines.push("现在发送：先采集；成功后同次注入");
+    lines.push("现在发送：先探针；未通过则按当前规则放行");
   }
 
   if (store.lastProbe) {
     const sameModel = !entry || !entry.model || !store.lastProbe.model || entry.model === store.lastProbe.model;
     const rejectedRenewal = active && sameModel && store.lastProbe.accepted === false && store.lastProbe.at >= entry.acquiredAt;
-    const probe = "HTTP " + (store.lastProbe.status || "-") + "／state " + (store.lastProbe.stateLength || 0);
+    const probe = "HTTP " + (store.lastProbe.status || "-") + "／state " + (store.lastProbe.stateLength || 0) +
+      (store.lastProbe.qualityTier ? "／iPhone " + store.lastProbe.qualityTier : "") +
+      (store.lastProbe.attempt ? "／第 " + store.lastProbe.attempt + " 次" : "") +
+      (store.lastProbe.route ? "／" + store.lastProbe.route : "");
     lines.push(rejectedRenewal
-      ? "最近续期：" + probe + " 未通过；继续复用缓存 292／" + formatTime(store.lastProbe.at)
+      ? "最近续期：" + probe + " 未通过；继续复用已验证缓存／" + formatTime(store.lastProbe.at)
       : "最近探针：" + probe + (store.lastProbe.model ? "／" + store.lastProbe.model : "") + "／" + formatTime(store.lastProbe.at));
   }
   const rateLimit = Object.values(store.rateLimits || {}).sort((left, right) => (right.until || 0) - (left.until || 0))[0];
@@ -380,11 +398,11 @@ function copyProbeHeaders(source) {
 function probeBody(model) {
   return JSON.stringify({
     model,
-    instructions: "Reply with OK.",
+    instructions: "请直接回答用户问题，不要联网搜索或调用外部工具。",
     input: [{
       type: "message",
       role: "user",
-      content: [{type: "input_text", text: "Reply with OK."}]
+      content: [{type: "input_text", text: QUALITY_PROMPT}]
     }],
     stream: true,
     store: false
@@ -394,6 +412,27 @@ function probeBody(model) {
 function streamCompleted(body) {
   return typeof body === "string" &&
     (/event:\s*response\.completed/.test(body) || /"type"\s*:\s*"response\.completed"/.test(body));
+}
+
+function probeOutputText(body) {
+  if (typeof body !== "string") return "";
+  let deltas = "";
+  let completed = "";
+  for (const line of body.split(/\r?\n/)) {
+    if (!/^data:\s*/.test(line)) continue;
+    try {
+      const event = JSON.parse(line.replace(/^data:\s*/, ""));
+      if (event.type === "response.output_text.delta" && typeof event.delta === "string") deltas += event.delta;
+      if (event.type === "response.output_text.done" && typeof event.text === "string") completed = event.text;
+    } catch (_) {}
+  }
+  return deltas || completed;
+}
+
+function iphoneTier(body) {
+  const text = probeOutputText(body).replace(/[０-９]/g, character => String.fromCharCode(character.charCodeAt(0) - 0xFEE0));
+  const match = text.match(/iphone[\s\-‑–—_]*(17|16|15)(?!\d)/i);
+  return match ? Number(match[1]) : 0;
 }
 
 function retryAfterSeconds(headers, now) {
@@ -430,11 +469,17 @@ function backoffWait(store, headers, now) {
   return record && record.until > now ? Math.ceil(record.until - now) : 0;
 }
 
-function probeRetryDelay(status, observed, headers, options) {
+function probeRetryDelay(status, observed, headers, options, qualityTier) {
   if (status === 401 || status === 403) return options.ttl;
   if (status === 429) return retryDelay(headers, options.cooldown);
-  if (!status || (status === 200 && observed)) return Math.min(options.cooldown, 30);
+  if (status === 200 && (qualityTier || observed)) return 1;
+  if (!status) return Math.min(options.cooldown, 30);
   return options.cooldown;
+}
+
+function shouldRetryProbe(status, attempt, options) {
+  if (attempt >= options.probeAttempts) return false;
+  return !status || status === 200 || status >= 500;
 }
 
 function freshProbeDescriptor(descriptor, nonce) {
@@ -485,59 +530,102 @@ function renew(url, requestHeaders, options, key, model, callback) {
     return;
   }
 
-  current.probeUntil = now + options.probeTimeout + 5;
-  current.nextProbeAt = now + options.cooldown;
+  current.probeUntil = now + options.probeTimeout * options.probeAttempts + 5;
+  current.nextProbeAt = 0;
   store.entries[key] = current;
   writeStore(store);
 
-  const request = {
-    url,
-    headers: copyProbeHeaders(requestHeaders),
-    body: probeBody(model),
-    timeout: options.probeTimeout,
-    "auto-redirect": false,
-    "auto-cookie": false
-  };
-  const route = applyProbeRoute(request, options, typeof $persistentStore !== "undefined" ? $persistentStore : null);
-
-  $httpClient.post(request, (error, response, body) => {
-    const finishedAt = Math.floor(Date.now() / 1000);
-    const latest = readStore();
-    const old = latest.entries[key] || current;
-    const status = response && Number(response.status);
-    const state = !error && response ? extractState(response.headers) : undefined;
-    const token = status === 200 && streamCompleted(body) ? acceptState(state, options, finishedAt) : undefined;
-    const observed = parseState(state);
-    if (status === 429) markRateLimit(latest, requestHeaders, response.headers, options, finishedAt, model);
-    else if (status >= 200 && status < 300) clearRateLimit(latest, requestHeaders, model);
-    latest.lastProbe = {
-      at: finishedAt,
-      model,
-      status: status || 0,
-      stateLength: state ? state.length : 0,
-      blocks: observed ? observed.blocks : 0,
-      accepted: !!token
+  function runAttempt(attempt) {
+    const request = {
+      url,
+      headers: copyProbeHeaders(requestHeaders),
+      body: probeBody(model),
+      timeout: options.probeTimeout,
+      "auto-redirect": false,
+      "auto-cookie": false
     };
-    addHistory(latest, {type: "probe", at: finishedAt, model, status: status || 0, stateLength: state ? state.length : 0, accepted: !!token});
+    const route = applyProbeRoute(request, options, typeof $persistentStore !== "undefined" ? $persistentStore : null);
 
-    if (token) {
-      latest.entries[key] = makeEntry(token, options, finishedAt, model);
-      writeStore(latest);
-      if (typeof $notification !== "undefined") {
-        $notification.post("Codex 292 已采集", "开始跨会话复用", "TTL 60 分钟，50 分钟后自动续期", {"auto-dismiss": true});
+    $httpClient.post(request, (error, response, body) => {
+      const finishedAt = Math.floor(Date.now() / 1000);
+      const latest = readStore();
+      const old = latest.entries[key] || current;
+      const status = response && Number(response.status);
+      const state = !error && response ? extractState(response.headers) : undefined;
+      const completed = status === 200 && streamCompleted(body);
+      const qualityTier = completed ? iphoneTier(body) : 0;
+      const token = qualityTier === 17 ? acceptFreshState(state, options, finishedAt) : undefined;
+      const observed = parseState(state);
+      if (status === 429) markRateLimit(latest, requestHeaders, response.headers, options, finishedAt, model);
+      else if (status >= 200 && status < 300) clearRateLimit(latest, requestHeaders, model);
+      latest.lastProbe = {
+        at: finishedAt,
+        model,
+        status: status || 0,
+        stateLength: state ? state.length : 0,
+        blocks: observed ? observed.blocks : 0,
+        qualityTier,
+        attempt,
+        attempts: options.probeAttempts,
+        route,
+        accepted: !!token
+      };
+      addHistory(latest, {
+        type: "probe",
+        at: finishedAt,
+        model,
+        status: status || 0,
+        stateLength: state ? state.length : 0,
+        qualityTier,
+        attempt,
+        accepted: !!token
+      });
+
+      if (token) {
+        latest.entries[key] = makeEntry(token, options, finishedAt, model, qualityTier);
+        writeStore(latest);
+        if (typeof $notification !== "undefined") {
+          $notification.post(
+            "Codex State 已采集",
+            "iPhone 17 质量探针通过",
+            "TTL " + duration(options.ttl) + "，" + duration(options.ttl - options.renew) + "后续期",
+            {"auto-dismiss": true}
+          );
+        }
+        console.log("[renew] accepted state len=" + token.value.length + " blocks=" + token.blocks +
+          " attempt=" + attempt + " route=" + route);
+        callback(undefined, latest.entries[key]);
+        return;
       }
-      console.log("[renew] accepted state len=" + token.value.length + " blocks=" + token.blocks + " route=" + route);
-      callback(undefined, latest.entries[key]);
-      return;
-    }
 
-    old.probeUntil = 0;
-    old.nextProbeAt = finishedAt + probeRetryDelay(status, observed, response && response.headers, options);
-    latest.entries[key] = old;
-    writeStore(latest);
-    console.log("[renew] rejected status=" + (status || "network") + " state_len=" + (state ? state.length : 0));
-    callback(error || "state rejected", old);
-  });
+      if (shouldRetryProbe(status, attempt, options)) {
+        old.probeUntil = finishedAt + options.probeTimeout * (options.probeAttempts - attempt) + 5;
+        old.nextProbeAt = 0;
+        latest.entries[key] = old;
+        writeStore(latest);
+        console.log("[renew] retrying with fresh route attempt=" + (attempt + 1) +
+          " quality=" + (qualityTier || "unknown") + " state_len=" + (state ? state.length : 0));
+        runAttempt(attempt + 1);
+        return;
+      }
+
+      old.probeUntil = 0;
+      old.nextProbeAt = finishedAt + probeRetryDelay(
+        status,
+        observed,
+        response && response.headers,
+        options,
+        qualityTier
+      );
+      latest.entries[key] = old;
+      writeStore(latest);
+      console.log("[renew] rejected status=" + (status || "network") + " quality=" +
+        (qualityTier || "unknown") + " state_len=" + (state ? state.length : 0));
+      callback(error || "quality probe rejected", old);
+    });
+  }
+
+  runAttempt(1);
 }
 
 function finishRequest(headers, key, model, entry) {
@@ -645,7 +733,7 @@ function handleResponse(options) {
   const key = flow ? flow.key : entryKey(requestHeaders, options, model);
   const current = store.entries[key];
   const state = extractState($response.headers);
-  const token = status === 200 ? acceptState(state, options, now) : undefined;
+  const validState = status === 200 ? acceptFreshState(state, options, now) : undefined;
   const observed = parseState(state);
   updateHistory(store, $request.id, {
     responseAt: now,
@@ -655,19 +743,9 @@ function handleResponse(options) {
     rateLimitDelay: rateLimit ? rateLimit.delay : 0
   });
 
-  if (!flow || !flow.injected) {
-    if (token) {
-      store.entries[key] = makeEntry(token, options, now, model);
-      updateHistory(store, $request.id, {captured: true});
-      if (typeof $notification !== "undefined") {
-        $notification.post("Codex 292 已采集", "开始跨会话复用", "TTL 60 分钟，50 分钟后自动续期", {"auto-dismiss": true});
-      }
-      console.log("[response] pass-through state captured len=" + token.value.length);
-    }
-  } else if (state && current && flow.fingerprint === current.fingerprint) {
-    current.strikes = token ? 0 : (current.strikes || 0) + 1;
+  if (flow && flow.injected && state && current && flow.fingerprint === current.fingerprint) {
+    current.strikes = validState ? 0 : (current.strikes || 0) + 1;
     store.entries[key] = current;
-    const observed = parseState(state);
     console.log("[response] injected state observed blocks=" + (observed ? observed.blocks : "invalid") + " strikes=" + current.strikes);
   }
 
@@ -689,6 +767,7 @@ function main() {
 if (typeof module !== "undefined") {
   module.exports = {
     applyProbeRoute,
+    acceptFreshState,
     acceptState,
     accountKey,
     accountProbeActive,
@@ -708,12 +787,15 @@ if (typeof module !== "undefined") {
     panelView,
     parseOptions,
     parseState,
+    probeOutputText,
     probeRetryDelay,
     probeBody,
+    iphoneTier,
     requestModel,
     requestContext,
     retryAfterSeconds,
     setHeader,
+    shouldRetryProbe,
     shouldRenew,
     streamCompleted,
     usable

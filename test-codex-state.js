@@ -13,9 +13,14 @@ const valid = token(10, now);
 const rejectedShape = token(11, now);
 const options = state.parseOptions("model=gpt-6-astra&ttl=3600&renew=600&cooldown=300");
 const allOptions = state.parseOptions("model=*&ttl=3600&renew=600&cooldown=300");
+const defaults = state.parseOptions("");
 
 assert.equal(options.policy, "");
-assert.equal(state.parseOptions("").model, "*");
+assert.equal(defaults.model, "*");
+assert.equal(defaults.ttl, 300);
+assert.equal(defaults.renew, 60);
+assert.equal(defaults.probeTimeout, 25);
+assert.equal(defaults.probeAttempts, 3);
 assert.equal(options.retryBase, 2);
 assert.equal(options.retryMax, 60);
 const routedProbe = {};
@@ -55,10 +60,12 @@ assert.equal(state.parseState(valid).blocks, 10);
 assert.equal(state.parseState(valid).issuedAt, now);
 assert.equal(state.acceptState(valid, options, now).blocks, 10);
 assert.equal(state.acceptState(rejectedShape, options, now), undefined);
+assert.equal(state.acceptFreshState(rejectedShape, options, now).blocks, 11);
 assert.equal(state.acceptState(token(10, now - 3600), options, now), undefined);
 assert.equal(state.parseState("not-a-state"), undefined);
 
-const entry = state.makeEntry(state.acceptState(valid, options, now), options, now, "gpt-6-astra");
+const entry = state.makeEntry(state.acceptState(valid, options, now), options, now, "gpt-6-astra", 17);
+assert.equal(entry.qualityTier, 17);
 assert.equal(entry.refreshAt, now + 3000);
 assert.equal(entry.expiresAt, now + 3570);
 assert.equal(state.shouldRenew(entry, now + 2999), false);
@@ -85,21 +92,34 @@ assert.equal(state.handlesModel({}, allOptions, '{"model":"gpt-6-sol"}'), true);
 assert.equal(state.handlesModel({}, allOptions, ""), false);
 assert.deepEqual(JSON.parse(state.probeBody("gpt-6-sol")), {
   model: "gpt-6-sol",
-  instructions: "Reply with OK.",
+  instructions: "请直接回答用户问题，不要联网搜索或调用外部工具。",
   input: [{
     type: "message",
     role: "user",
-    content: [{type: "input_text", text: "Reply with OK."}]
+    content: [{type: "input_text", text: "请回答：最新的 iPhone 型号是什么，禁止联网搜索，基于已有的知识回答。"}]
   }],
   stream: true,
   store: false
 });
 assert.equal(state.streamCompleted("event: response.completed\ndata: {}"), true);
 assert.equal(state.streamCompleted("event: response.failed"), false);
-assert.equal(state.probeRetryDelay(200, {blocks: 11}, {}, options), 30);
+const qualitySse = [
+  'data: {"type":"response.output_text.delta","delta":"iPhone "}',
+  'data: {"type":"response.output_text.delta","delta":"17 Pro 系列"}',
+  'event: response.completed',
+  'data: {"type":"response.completed"}'
+].join("\n");
+assert.equal(state.probeOutputText(qualitySse), "iPhone 17 Pro 系列");
+assert.equal(state.iphoneTier(qualitySse), 17);
+assert.equal(state.iphoneTier('data: {"type":"response.output_text.done","text":"iPhone １６ 系列"}'), 16);
+assert.equal(state.iphoneTier('data: {"type":"response.output_text.done","text":"无法判断"}'), 0);
+assert.equal(state.probeRetryDelay(200, {blocks: 11}, {}, options), 1);
 assert.equal(state.probeRetryDelay(429, undefined, {"Retry-After": "600"}, options), 600);
 assert.equal(state.probeRetryDelay(403, undefined, {}, options), 3600);
 assert.equal(state.probeRetryDelay(0, undefined, {}, options), 30);
+assert.equal(state.shouldRetryProbe(200, 1, defaults), true);
+assert.equal(state.shouldRetryProbe(429, 1, defaults), false);
+assert.equal(state.shouldRetryProbe(200, 3, defaults), false);
 assert.equal(state.retryAfterSeconds({"Retry-After": "12"}, now), 12);
 assert.equal(state.retryAfterSeconds({"Retry-After": new Date((now + 15) * 1000).toUTCString()}, now), 15);
 const rateStore = {rateLimits: {}};
@@ -122,8 +142,8 @@ const context = state.requestContext({
 assert.deepEqual(context, {thread: "5678abcd", turn: "ef123456"});
 
 const waitingPanel = state.panelView({entries: {}, history: [], lastProbe: null}, options, now);
-assert.equal(waitingPanel.title, "Codex 292：等待采集");
-assert.match(waitingPanel.content, /现在发送：先采集/);
+assert.equal(waitingPanel.title, "Codex State：等待采集");
+assert.match(waitingPanel.content, /先探针；未通过则按当前规则放行/);
 
 entry.injectionCount = 3;
 entry.refreshAt = now - 1;
@@ -134,13 +154,15 @@ const activePanel = state.panelView({
   rateLimits: {test: {until: now + 10, failures: 2}},
   lastProbe: {at: now, status: 200, stateLength: 312, accepted: false}
 }, options, now);
-assert.equal(activePanel.title, "Codex 292：正在复用");
+assert.equal(activePanel.title, "Codex State：正在复用");
 assert.equal(activePanel.style, "good");
-assert.match(activePanel.content, /现在发送：会注入 292/);
+assert.match(activePanel.content, /现在发送：会注入已验证 state（292）/);
 assert.match(activePanel.content, /模型：gpt-6-astra/);
+assert.match(activePanel.content, /质量验证：iPhone 17/);
 assert.match(activePanel.content, /续期：上次未通过，1 分 30 秒后重试/);
-assert.match(activePanel.content, /最近续期：HTTP 200／state 312 未通过；继续复用缓存 292/);
+assert.match(activePanel.content, /最近续期：HTTP 200／state 312 未通过；继续复用已验证缓存/);
 assert.match(activePanel.content, /429 退避：10 秒／连续 2 次/);
-assert.match(activePanel.content, /已注入 292.*响应 312/);
+assert.match(activePanel.content, /已注入 state.*响应 312/);
+assert.match(state.historyLine({type: "request", at: now, injected: false}), /未验证放行/);
 
 console.log("codex-state self-check passed");

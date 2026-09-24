@@ -1,0 +1,955 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex Sleep State Sugar 研究总结</title>
+  <style>
+    :root {
+      --bg: #f4f1eb;
+      --paper: #fffefb;
+      --ink: #272522;
+      --muted: #6e6961;
+      --line: #ded9d0;
+      --soft: #f7f4ee;
+      --blue: #315c78;
+      --blue-soft: #eaf2f7;
+      --green: #2f6b4f;
+      --green-soft: #eaf4ee;
+      --amber: #8a5b19;
+      --amber-soft: #fbf1dd;
+      --red: #8b3e3e;
+      --red-soft: #f8eaea;
+      --code: #f1eee8;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.65;
+    }
+
+    main {
+      width: min(1100px, calc(100% - 32px));
+      margin: 32px auto;
+      padding: clamp(24px, 5vw, 64px);
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 12px 34px rgba(48, 43, 36, 0.07);
+    }
+
+    h1, h2, h3 { line-height: 1.25; letter-spacing: -0.02em; }
+    h1 { margin: 0 0 10px; font-size: clamp(2rem, 5vw, 3.25rem); }
+    h2 { margin: 52px 0 16px; padding-top: 8px; font-size: 1.55rem; }
+    h3 { margin: 28px 0 10px; font-size: 1.08rem; }
+    p { margin: 10px 0; }
+    a { color: var(--blue); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    code {
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+      background: var(--code);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.91em;
+      overflow-wrap: anywhere;
+    }
+    pre {
+      overflow-x: auto;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #292824;
+      color: #f7f4ed;
+      font-size: 0.88rem;
+    }
+    pre code { padding: 0; background: none; color: inherit; }
+
+    .subtitle { max-width: 780px; color: var(--muted); font-size: 1.08rem; }
+    .eyebrow {
+      margin-bottom: 8px;
+      color: var(--blue);
+      font-size: 0.78rem;
+      font-weight: 750;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 28px 0;
+    }
+    .card {
+      min-width: 0;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--soft);
+    }
+    .card .label { color: var(--muted); font-size: 0.76rem; font-weight: 700; }
+    .card .value { margin-top: 5px; font-weight: 700; overflow-wrap: anywhere; }
+
+    .callout {
+      margin: 18px 0;
+      padding: 16px 18px;
+      border-left: 4px solid var(--blue);
+      border-radius: 4px;
+      background: var(--blue-soft);
+    }
+    .callout.warn { border-color: var(--amber); background: var(--amber-soft); }
+    .callout.danger { border-color: var(--red); background: var(--red-soft); }
+    .callout.good { border-color: var(--green); background: var(--green-soft); }
+    .callout strong { display: block; margin-bottom: 4px; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+      margin: 20px 0;
+    }
+    .step {
+      min-width: 0;
+      padding: 14px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--soft);
+      font-size: 0.9rem;
+      overflow-wrap: anywhere;
+    }
+    .step b { display: block; margin-bottom: 4px; color: var(--blue); }
+
+    .table-wrap { overflow-x: auto; margin: 14px 0 24px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.91rem; }
+    th, td {
+      padding: 11px 12px;
+      border: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+      overflow-wrap: anywhere;
+    }
+    th { background: var(--soft); font-weight: 750; white-space: nowrap; }
+    td:first-child { font-weight: 650; }
+    .status {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+    .observed { color: var(--green); background: var(--green-soft); }
+    .implemented { color: var(--blue); background: var(--blue-soft); }
+    .inferred { color: var(--amber); background: var(--amber-soft); }
+    .invalidated { color: var(--red); background: var(--red-soft); }
+    ul, ol { padding-left: 1.4rem; }
+    li + li { margin-top: 5px; }
+    .small { color: var(--muted); font-size: 0.86rem; }
+    .sources li { margin-bottom: 7px; }
+    .packet-sequence {
+      display: grid;
+      gap: 18px;
+      margin: 20px 0 28px;
+    }
+    .packet {
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--paper);
+    }
+    .packet-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 15px;
+      border-bottom: 1px solid var(--line);
+      background: var(--soft);
+    }
+    .packet-head strong { color: var(--blue); }
+    .packet-head span { color: var(--muted); font-size: 0.82rem; text-align: right; }
+    .packet-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+    }
+    .packet-side { min-width: 0; padding: 14px; background: var(--paper); }
+    .packet-label {
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 0.76rem;
+      font-weight: 750;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .packet pre { margin: 0; min-height: 100%; font-size: 0.79rem; line-height: 1.5; }
+    .packet-note { margin: 0; padding: 12px 15px; border-top: 1px solid var(--line); font-size: 0.89rem; }
+    .packet-note.good { background: var(--green-soft); }
+    .packet-note.warn { background: var(--amber-soft); }
+    .packet-note.danger { background: var(--red-soft); }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 14px 0;
+    }
+    footer { margin-top: 52px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); }
+
+    @media (max-width: 850px) {
+      .meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .flow { grid-template-columns: 1fr; }
+      .packet-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 560px) {
+      main { width: 100%; margin: 0; border: 0; border-radius: 0; padding: 24px 18px 40px; }
+      .meta { grid-template-columns: 1fr; }
+      h2 { margin-top: 38px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Source-backed technical brief · 2026-09-24</div>
+  <h1>从 292 / 312 到 780</h1>
+  <p class="subtitle">Codex Sleep State Sugar 的研究成果、完整参数、实际实现、已验证边界，以及从长度分类迁移到 iPhone 17 质量闸门后的结论。</p>
+
+  <section class="meta" aria-label="摘要信息">
+    <div class="card"><div class="label">实现基线</div><div class="value">tzf1003/csss · state v6</div></div>
+    <div class="card"><div class="label">当前观测</div><div class="value">HTTP 200 · state 780 · 33 blocks</div></div>
+    <div class="card"><div class="label">旧接纳规则</div><div class="value">state 292 · 10 blocks</div></div>
+    <div class="card"><div class="label">当前判断</div><div class="value">长度分类已不足以证明路由质量</div></div>
+  </section>
+
+  <div class="callout good">
+    <strong>结论先行</strong>
+    当前代码不再用 292、312 或 780 的长度决定质量。隐藏探针只有在回答命中 <code>iPhone 17</code>、SSE 完整且 state 外层结构和签发时间有效时才缓存；<code>iPhone 16</code>、<code>iPhone 15</code> 或无法判定均拒绝。长度与块数只保留为诊断信息。
+  </div>
+
+  <div class="callout warn">
+    <strong>协议层出现了更重要的新证据</strong>
+    当前 OpenAI Codex 源码把 <code>x-codex-turn-state</code> 定义为“一个 turn 内”的粘性路由状态：同一 turn 的续传、重试和增量请求应原样回送；不同 turn 之间不应携带。CSSS 的跨新会话、跨 turn 复用属于实验性、非官方支持用法，并可能造成路由错误。
+  </div>
+
+  <h2>1. 我们到底观察到了什么</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>信号</th><th>外层结构</th><th>历史行为</th><th>现在能下的结论</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>292</code></td>
+          <td>Base64URL 字符串 292 字符；解码后 217 字节；<code>(217-57)/16 = 10</code> 块</td>
+          <td>本机历史上曾采集并反复注入；用户的全新会话测试曾与正常质量结果相关</td>
+          <td><span class="status observed">历史观测</span> 是旧规则接纳的经验形状；不是 OpenAI 公布的质量等级</td>
+        </tr>
+        <tr>
+          <td><code>312</code></td>
+          <td>312 字符；233 字节；11 块</td>
+          <td>探针和正式响应都出现过；旧代码按块数拒绝，当前代码需结合探针回答判断</td>
+          <td><span class="status inferred">经验信号</span> 与较差结果曾相关，但“撤销凭据”的含义没有公开协议证明</td>
+        </tr>
+        <tr>
+          <td><code>780</code></td>
+          <td>780 字符；585 字节；33 块</td>
+          <td>近期在多个模型请求中重复出现；旧规则拒绝，当前规则可在 iPhone 17 探针中接纳</td>
+          <td><span class="status observed">当前观测</span> 与固定长度填充或载荷扩张一致；无法从密文外形区分两者</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>这里的 292、312、780 是 <code>x-codex-turn-state</code> 请求头值的字符串长度，不是 HTTP 状态码。我们实际抓到的网络结果是 <code>HTTP 200 + x-codex-turn-state</code>。原始文章把 292/312描述成自定义响应码，而当前实现和后续社区项目实际按“头部值长度与块数”工作，两者不能混为一谈。</p>
+
+  <p>外层解析目前只能读出：</p>
+  <ul>
+    <li>第 1 字节必须是 <code>0x80</code>；</li>
+    <li>第 2–9 字节按大端整数解释为签发时间；</li>
+    <li>余下部分必须满足 <code>57 + 16 × blocks</code>；</li>
+    <li>完整值可以做指纹和原样回放，但内容本身不可读。</li>
+  </ul>
+  <p>因此不能安全地把 780 截短成 292。它是不透明且很可能带完整性保护的状态值；任何裁剪或拼接都没有有效性依据。</p>
+
+  <h2>2. 当前实现的完整流程</h2>
+
+  <div class="flow" aria-label="运行流程">
+    <div class="step"><b>1 · 捕获</b>Surge MITM 匹配 Responses URL，并读取请求头与 JSON 请求体。</div>
+    <div class="step"><b>2 · 识别</b>按请求头、路由提示、请求体顺序识别实际模型，组成“账号 + 模型”缓存键。</div>
+    <div class="step"><b>3 · 采集</b>没有可用值时，用同一认证和模型发送 iPhone 质量探针，可单独指定住宅 IP / SOCKS5 出口；默认最多换 3 次出口。</div>
+    <div class="step"><b>4 · 校验与注入</b>仅接纳 HTTP 200、完整 SSE、回答 iPhone 17 且 state 外层结构与时间有效的值；随后写入请求头。</div>
+    <div class="step"><b>5 · 观测</b>响应脚本记录状态、长度、退避和历史；面板显示最近结果。</div>
+  </div>
+
+  <h3>缓存替换规则</h3>
+  <ul>
+    <li>只有通过全部校验的新 state 才会替换缓存。</li>
+    <li>400、429、网络错误、非 iPhone 17 回答或缺少/无效 state 都不会覆盖仍有效的旧值。</li>
+    <li>进入续期窗口后，正式请求会先等探针；探针失败时，只要旧值尚未过期，仍继续使用旧值。</li>
+    <li>旧值过期且采集失败时，正式请求普通放行，不注入 state。</li>
+    <li>同一账号一次只允许一个模型探针运行；其他模型请求会先普通放行。</li>
+  </ul>
+
+  <h2>3. 所有脚本参数</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>参数</th><th>默认值</th><th>用途</th><th>验证与实际语义</th><th>局限</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>policy</code></td>
+          <td>空</td>
+          <td>给内部采集探针指定一个已有 Surge 策略</td>
+          <td>持久化的探针路由为空时才使用；为空则沿当前规则</td>
+          <td>只应用于内部 <code>$httpClient</code> 探针，不会改变正式 Codex 请求的选路</td>
+        </tr>
+        <tr>
+          <td><code>model</code></td>
+          <td><code>*</code></td>
+          <td>处理全部模型，或限制为某个模型 ID</td>
+          <td><code>*</code>/<code>all</code> 为全模型；否则精确匹配。模型 ID 只允许字母、数字及 <code>._:/-</code>，最长 128 字符</td>
+          <td>全模型模式下若请求头和不超过 1 MiB 的 JSON 请求体都无法识别模型，则请求直接放行；不同模型绝不共用缓存</td>
+        </tr>
+        <tr>
+          <td><code>blocks</code></td>
+          <td><code>10</code></td>
+          <td>旧版长度分类参数；保留给兼容函数和诊断</td>
+          <td>必须大于 0；当前在线质量路径不再用它决定是否收票</td>
+          <td>修改该值不会绕过 iPhone 17 质量闸门；后续可在确认无人依赖旧接口后删除</td>
+        </tr>
+        <tr>
+          <td><code>ttl</code></td>
+          <td><code>300</code> 秒</td>
+          <td>从 state 内部签发时间起计算名义寿命</td>
+          <td>最小 120 秒；实际过期点为 <code>issuedAt + ttl - 30</code></td>
+          <td>本地 TTL 不能延长服务端真实有效性；依赖内部时间字段语义保持不变</td>
+        </tr>
+        <tr>
+          <td><code>renew</code></td>
+          <td><code>60</code> 秒</td>
+          <td>到期前多少秒进入续期窗口</td>
+          <td>最小 30 秒；默认在剩余约 1 分钟时续期</td>
+          <td>它不是“每隔多久续期”。若 <code>renew ≥ ttl</code>，代码会改为约 <code>ttl/3</code></td>
+        </tr>
+        <tr>
+          <td><code>cooldown</code></td>
+          <td><code>300</code> 秒</td>
+          <td>一般探针失败后的冷却</td>
+          <td>最小 30 秒</td>
+          <td>HTTP 200 但质量未通过时会很快允许下一批探针；网络无响应通常缩短为最多 30 秒，因此不是所有失败都等 5 分钟</td>
+        </tr>
+        <tr>
+          <td><code>timeout</code></td>
+          <td><code>25</code> 秒</td>
+          <td>内部探针的网络超时，代码名为 <code>probeTimeout</code></td>
+          <td>必须大于 0；探针锁额外保留 5 秒</td>
+          <td>与 Surge 脚本行上的 <code>timeout=90/10/5</code> 不是同一参数；太短会在完整 SSE 到达前失败</td>
+        </tr>
+        <tr>
+          <td><code>probe_attempts</code></td>
+          <td><code>3</code></td>
+          <td>一批质量采集最多尝试的住宅出口次数</td>
+          <td>仅接受 1–8 的整数；每次重新解析探针策略并可生成新的 1024Proxy 会话</td>
+          <td>尝试次数越多，延迟、额度消耗和 429 风险越高；三次都失败后正式请求未验证放行</td>
+        </tr>
+        <tr>
+          <td><code>retry_base</code></td>
+          <td><code>2</code> 秒</td>
+          <td>正式请求 429 的指数退避起点</td>
+          <td>最小 1 秒；序列为 base × 2<sup>n-1</sup></td>
+          <td>只调度客户端之后发起的重试，不能无损重放已经失败的流式请求</td>
+        </tr>
+        <tr>
+          <td><code>retry_max</code></td>
+          <td><code>60</code> 秒</td>
+          <td>本地 429 等待上限</td>
+          <td>不得小于当前 <code>retry_base</code></td>
+          <td>服务端更长的 <code>Retry-After</code> 仍会回写给客户端，但本地状态等待最多为该上限；设置超过请求脚本 90 秒执行超时可能失效</td>
+        </tr>
+        <tr>
+          <td><code>force_http</code></td>
+          <td><code>1</code> / true</td>
+          <td>中止匹配的 WebSocket Upgrade，让 Codex 回退 HTTP/SSE</td>
+          <td>只有精确值 <code>0</code> 或 <code>false</code> 会关闭</td>
+          <td>依赖客户端确实会回退；可能显示“Handshake not finished”，也可能直接中断。它放弃了官方优先发展的 WebSocket 路径</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="small">参数通过 URL 查询串形式的 <code>argument=...</code> 解析。未知参数被忽略，重复参数以后一个有效值为准；畸形百分号编码会让 <code>decodeURIComponent</code> 抛错并使本次脚本失效。</p>
+
+  <h2>4. Surge 模块声明参数</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>配置</th><th>当前值</th><th>作用</th><th>局限</th></tr></thead>
+      <tbody>
+        <tr><td><code>[MITM] hostname</code></td><td><code>chatgpt.com, api.openai.com</code></td><td>让脚本看到 HTTPS 头与正文</td><td>需要信任 Surge 证书；只覆盖列出的主机；MITM 本身扩大本机敏感流量暴露面</td></tr>
+        <tr><td><code>pattern</code></td><td><code>/backend-api/codex/responses</code> 与 <code>/v1/responses</code></td><td>限制匹配范围</td><td>其他域名、路径、协议或中转端点不会处理；Surge 每类请求只运行第一个匹配脚本，可能被其他模块抢先</td></tr>
+        <tr><td><code>script-path</code></td><td>GitHub Raw main</td><td>加载公开脚本</td><td>依赖 GitHub 可达性和主分支内容；本机缓存不会实时更新</td></tr>
+        <tr><td><code>script-update-interval</code></td><td>86400 秒</td><td>每天检查脚本更新</td><td>紧急修复不会立刻生效，需要重载或本地脚本</td></tr>
+        <tr><td><code>requires-body</code>（请求）</td><td>true</td><td>读取 JSON 请求体中的模型</td><td>会缓冲完整请求体；Surge Mac 默认最多 10 MB，而代码只解析不超过 1 MiB 的正文</td></tr>
+        <tr><td><code>requires-body</code>（响应）</td><td>false</td><td>收到响应头即可运行，不缓冲 SSE</td><td>响应脚本看不到正文，不能在 429 后透明重放提示词和流式结果</td></tr>
+        <tr><td><code>timeout</code>（脚本行）</td><td>面板 5 / 请求 90 / 响应 10 秒</td><td>限制整个脚本运行时间</td><td>请求脚本必须覆盖内部探针和 429 等待；配置过长的 <code>retry_max</code> 会超过它</td></tr>
+        <tr><td><code>engine</code></td><td>jsc</td><td>使用 JavaScriptCore</td><td>不能假定 WebView 才有的完整 Web API</td></tr>
+        <tr><td><code>debug</code></td><td>true（请求/响应）</td><td>把日志附到请求 Notes，便于诊断</td><td>日志虽未写完整 state/认证，但仍含模型、状态与时间等元数据</td></tr>
+        <tr><td><code>update-interval</code>（面板）</td><td>1</td><td>打开菜单时几乎每次刷新</td><td>并非后台每秒轮询；Surge 在面板打开或到期检查时更新</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>5. 探针请求的全部关键字段</h2>
+
+  <h3>请求头</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>字段</th><th>来源/值</th><th>用途与局限</th></tr></thead>
+      <tbody>
+        <tr><td><code>authorization</code></td><td>复制正式请求</td><td>维持同一认证；敏感值仅在本机内存和请求中使用</td></tr>
+        <tr><td><code>chatgpt-account-id</code></td><td>复制正式请求</td><td>绑定账号并参与缓存键；缺失时退化为公共键 <code>default</code></td></tr>
+        <tr><td><code>originator</code></td><td>复制正式请求</td><td>维持客户端身份；缺失不会由脚本补造</td></tr>
+        <tr><td><code>user-agent</code></td><td>复制正式请求</td><td>减少探针与客户端差异，但不能复制全部隐含上下文</td></tr>
+        <tr><td><code>version</code></td><td>复制正式请求</td><td>保留客户端版本提示</td></tr>
+        <tr><td><code>openai-beta</code></td><td>复制正式请求</td><td>保留 Responses/WebSocket 功能约定</td></tr>
+        <tr><td><code>x-codex-installation-id</code></td><td>复制正式请求</td><td>保留安装身份；也意味着换账号/安装时不能盲目复用 state</td></tr>
+        <tr><td><code>content-type</code></td><td><code>application/json</code></td><td>固定探针 JSON 形状</td></tr>
+        <tr><td><code>accept</code></td><td><code>text/event-stream</code></td><td>要求 SSE</td></tr>
+        <tr><td><code>connection</code></td><td><code>close</code></td><td>尽量避免复用连接；代理或上游仍可能有自己的池化</td></tr>
+        <tr><td><code>x-codex-state-probe</code></td><td><code>1</code></td><td>内部标记，避免模块递归拦截自己的探针</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>请求体</h3>
+  <pre><code>{
+  "model": "&lt;实际模型&gt;",
+  "instructions": "请回答：最新的 iPhone 型号是什么，禁止联网搜索，基于已有的知识回答。",
+  "input": [{
+    "type": "message",
+    "role": "user",
+    "content": [{"type": "input_text", "text": "请回答：最新的 iPhone 型号是什么，禁止联网搜索，基于已有的知识回答。"}]
+  }],
+  "stream": true,
+  "store": false
+}</code></pre>
+  <p>早期“通用模型”改动曾把 <code>input</code> 简化成字符串，Codex 后端返回 400。改回 <code>instructions + input[] + stream:true + store:false</code> 后实测恢复 HTTP 200。探针仍是一条真实模型生成，会消耗额度并可能触发 429；脚本会拼接 SSE 文本后判定 iPhone 系列。</p>
+
+  <h2>6. 探针路由参数与优先级</h2>
+
+  <ol>
+    <li><code>csss-probe-policy-descriptor-v1</code> 中的多个策略名（用 <code>|</code> 分隔，轮询）；</li>
+    <li>同一持久化键中的原始 <code>socks5,...</code> / <code>socks5-tls,...</code> 描述符；</li>
+    <li>同一持久化键中的单个命名策略；</li>
+    <li><code>policy</code> 参数；</li>
+    <li>Surge 当前规则。</li>
+  </ol>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>路由项</th><th>行为</th><th>限制</th></tr></thead>
+      <tbody>
+        <tr><td>多个命名策略</td><td>用 <code>csss-probe-policy-cursor-v1</code> 保存轮询游标</td><td>每个名称 ≤128 字符，总描述 ≤2048；策略必须已存在于主配置</td></tr>
+        <tr><td>原始 SOCKS5 描述符</td><td>建立临时 <code>policy-descriptor</code>；缺少上游时补 <code>underlying-proxy=DIRECT</code></td><td>凭据明文保存在 Surge 本机持久化存储；逗号型字段没有转义层</td></tr>
+        <tr><td>1024Proxy 会话</td><td>识别 <code>*.1024proxy.io</code>，每次生成新的 <code>sid</code>，并设为 <code>t-1</code></td><td>只识别当前用户名格式；新会话只能减少连接复用，不能保证新出口或 iPhone 17 回答</td></tr>
+        <tr><td>住宅 IP</td><td>曾显著改变黑盒采集结果；矩阵探针第一次尝试就曾拿到 292</td><td>相关性不等于稳定因果；账号、时间、模型、负载、会话与连接池都是混杂变量</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>7. 状态、时间与失败处理</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>条件</th><th>当前代码行为</th><th>默认等待</th></tr></thead>
+      <tbody>
+        <tr><td>HTTP 200 + 完整 SSE + iPhone 17 + 有效 state</td><td>保存并可在同一正式请求中注入</td><td>直到续期窗口</td></tr>
+        <tr><td>HTTP 200 + iPhone 16/15/无法判定</td><td>拒绝，不替换旧缓存；批内继续换出口</td><td>批次结束后 1 秒即可允许下一批</td></tr>
+        <tr><td>网络错误 / 无状态</td><td>拒绝并普通放行</td><td>30 秒</td></tr>
+        <tr><td>400 / 5xx 等一般状态</td><td>拒绝并普通放行</td><td><code>cooldown</code>，默认 300 秒</td></tr>
+        <tr><td>401 / 403</td><td>长冷却，避免持续撞认证/权限</td><td><code>ttl</code>，默认 300 秒</td></tr>
+        <tr><td>探针 429</td><td>记录账号级限流，同时延后下次探针</td><td>至少 <code>cooldown</code>，并尊重更长的服务端 Retry-After</td></tr>
+        <tr><td>正式请求 429</td><td>回写 Retry-After；挂起客户端下一次自动重试</td><td>2、4、8、16、32、60 秒，或服务端值</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>正式请求的 429 不能由 Surge JavaScript 无损“接管并重放”：响应脚本没有原始请求正文，且当前配置不缓冲完整流式响应。代码只延迟客户端自己发起的后续重试；客户端重试耗尽后仍会显示 429。</p>
+
+  <h2>8. 持久化数据与内部常量</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>键/常量</th><th>内容</th><th>边界</th></tr></thead>
+      <tbody>
+        <tr><td><code>codex-turn-state-v6</code></td><td>完整 state、质量档位、账号+模型键、请求流、历史、429 状态、最后探针</td><td>本机明文存储；并非只存脱敏元数据；升级后不会沿用旧版未经过质量闸门的缓存</td></tr>
+        <tr><td><code>csss-probe-policy-descriptor-v1</code></td><td>命名策略、策略列表或完整 SOCKS5 描述符</td><td>可能包含代理账号与密码，不能提交或分享</td></tr>
+        <tr><td><code>csss-probe-policy-cursor-v1</code></td><td>策略列表轮询位置</td><td>只保证轮询，不验证出口真的变化</td></tr>
+        <tr><td>历史上限</td><td>存 12 条，面板显示最近 6 条</td><td>不是长期审计日志</td></tr>
+        <tr><td>请求流寿命</td><td>600 秒</td><td>响应超过该时间后可能无法和请求阶段记录配对</td></tr>
+        <tr><td>state 长度上限</td><td>2048 字符</td><td>更长的新格式会直接判无效</td></tr>
+        <tr><td>时间范围</td><td>2020-01-01 至 2100-01-01；允许未来 30 秒误差</td><td>假定字节 1–8 的时间布局不变</td></tr>
+        <tr><td>过期安全边际</td><td>30 秒</td><td>不能反映服务端提前撤销</td></tr>
+        <tr><td>429 连续计数</td><td>最多记 16 次</td><td>账号级，某模型的限流可能延迟同账号其他模型</td></tr>
+        <tr><td>指纹</td><td>32 位 FNV-1a</td><td>仅用于关联日志，不是安全哈希，也不能证明 token 相等以外的语义</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>9. 已确认的实现边界</h2>
+
+  <div class="callout good">
+    <strong>质量闸门已落地</strong>
+    <code>probeBody()</code> 发送固定 iPhone 问题，回调拼接 SSE 输出并只接受 iPhone 17。每批默认最多尝试 3 次；全部失败且没有未过期缓存时，正式请求会明确记录为“未验证放行”。
+  </div>
+
+  <ul>
+    <li><strong>跨 turn 复用：</strong>CSSS 的核心行为与当前官方客户端的 turn 生命周期约定冲突。它可以发送该头，但不等于服务端承诺支持。</li>
+    <li><strong>质量规则是项目约定：</strong>iPhone 回答可作为本项目的黑盒验收信号，但不是 OpenAI 发布的模型身份字段。</li>
+    <li><strong>面板不是分模型仪表盘：</strong><code>lastProbe</code> 是全局一条，面板选择一个“最新/可用”条目；多模型同时使用时可能把不同模型的状态并排展示。</li>
+    <li><strong>旧缓存迁移：</strong>历史条目可能没有新版本加入的 <code>model</code> 字段，模型仍存在于内部键中，但面板不一定显示。</li>
+    <li><strong>正常请求选路：</strong><code>policy</code> 与专用 SOCKS5 只影响采集探针；正常 Codex 请求继续走 Surge 规则。</li>
+    <li><strong>正常响应不能补做质量判定：</strong>响应脚本不缓冲 SSE 正文，只有隐藏探针能把回答与 state 绑定后写入质量缓存。</li>
+    <li><strong>API 通道差异：</strong>同一脚本同时匹配 ChatGPT Codex 后端和 OpenAI <code>/v1/responses</code>，但两者认证、模型权限和 state 行为不保证一致。</li>
+  </ul>
+
+  <h2>10. 之前的实验结论如何保留</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>研究结果</th><th>保留程度</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>住宅 IP / 新出口会改变 state 外形与回答结果</td><td><span class="status observed">保留为观测</span></td><td>节点矩阵曾快速拿到 292；出口、账号、时间与连接会共同影响结果</td></tr>
+        <tr><td>通过质量闸门的 state 可以被完整捕获、存储和再次发送</td><td><span class="status implemented">工程上成立</span></td><td>Surge 能做到字节不变的头部回放；服务端是否按预期解释是另一问题</td></tr>
+        <tr><td>292 跨新会话可长期锁定高质量路由</td><td><span class="status invalidated">未建立</span></td><td>历史 A/B 曾显示相关性；当前官方源码明确 state 的作用域是单 turn，跨 turn 使用不受支持</td></tr>
+        <tr><td>312 必然代表降智撤销</td><td><span class="status inferred">经验相关</span></td><td>没有公开协议字段证明；当前代码也没有实现收到两次异常后立即重采</td></tr>
+        <tr><td>只看长度即可识别好坏</td><td><span class="status invalidated">当前失效</span></td><td>统一出现 780 后，长度不再提供原来的区分度</td></tr>
+        <tr><td>不同模型可共用 state</td><td><span class="status invalidated">已排除</span></td><td>当前实现按账号 + 实际模型隔离；公开社区工具也采用模型隔离</td></tr>
+        <tr><td>探针失败会破坏已有已验证缓存</td><td><span class="status implemented">不会</span></td><td>只有合格新值才替换；失败保留未过期旧值</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>11. 降质测试方法</h2>
+
+  <p>此前形成的业务验收规则仍可作为用户定义的结果指标：</p>
+  <ul>
+    <li>回答 iPhone 17 系列：按既定规则记为正常 GPT-6；</li>
+    <li>回答 iPhone 16 系列：记为路由到 GPT-5.6 Luna；</li>
+    <li>回答 iPhone 15 系列：记为更严重降质。</li>
+  </ul>
+  <p>有效测试单位必须是“全新会话”，不能在固定会话里连续问三次。建议每个条件至少 5 个新会话，并随机交错“注入/不注入”，同时记录模型、出口、请求时间、是否实际注入、请求 state 指纹、响应长度与块数。这样可以避免先发生服务端路由变化、再切开关造成假阳性。</p>
+
+  <div class="callout">
+    <strong>这个测试回答的是“最终体验有没有变化”</strong>
+    它可以按既定规则判定降质结果；它不能从协议层解释 OpenAI 内部为何路由，也不能单独证明是 state、IP、session-id、负载或账号状态中的哪一个变量造成变化。
+  </div>
+
+  <h2>12. 质量闸门落地后的验证方法</h2>
+
+  <ol>
+    <li><strong>先核对面板：</strong>记录探针模型、住宅出口类型、尝试次数、iPhone 档位、state 长度与是否注入。</li>
+    <li><strong>分开测试作用域：</strong>比较同一 turn 内回送与新 turn 回送。前者符合官方客户端语义，后者是 CSSS 的实验组。</li>
+    <li><strong>再做回答 A/B：</strong>每组至少 5 个全新会话，随机交错“已验证注入”和“未验证放行”。</li>
+    <li><strong>按模型分别统计：</strong>缓存不会跨模型共享；每个模型都必须独立取得 iPhone 17 + 有效 state 的样本。</li>
+  </ol>
+
+  <p>质量闸门消除了“固定长度就是好票”的依赖，但没有消除跨 turn 回放的实验性质。需要持续验证的是：同模型、同账号下，带有 iPhone 17 质量证据的 state 在新 turn 中是否稳定改善最终体验。</p>
+
+  <h2 id="burp-flow">13. Burp 风格：一次 turn 从建连到结束</h2>
+
+  <div class="callout">
+    <strong>阅读边界</strong>
+    以下是依据当前脚本和官方客户端语义重建的脱敏报文，不是从 Burp 导出的原始账号流量。头名、路径和 CSSS 决策来自当前实现；省略了 Cookie、追踪头、精确长度及会变化的 SSE 字段。尖括号内容都是占位符，不能直接发送。
+  </div>
+
+  <p>这里必须先拆开三个常被统称为“会话”的对象：</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>对象</th><th>例子</th><th>什么时候结束</th><th>与 state 的关系</th></tr></thead>
+      <tbody>
+        <tr><td>对话 / thread</td><td><code>&lt;THREAD_ID&gt;</code></td><td>可以跨很多轮用户消息长期存在</td><td>不是官方 turn-state 的作用域</td></tr>
+        <tr><td>一次 turn</td><td><code>&lt;TURN_ID&gt;</code></td><td>该轮模型输出和工具循环完成时</td><td>官方语义：同一 turn 内收到后原样回送，下一 turn 丢弃</td></tr>
+        <tr><td>传输连接</td><td>WebSocket，或 HTTP/TLS 连接</td><td>断线、Close 帧或连接池回收时</td><td>连接可重建，不等于 turn 或 thread 结束</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="legend" aria-label="报文图例">
+    <span class="status implemented">线上报文</span>
+    <span class="status inferred">Surge 本地动作</span>
+    <span class="status invalidated">实验性跨 turn 行为</span>
+  </div>
+
+  <h3>Burp Proxy history 视图</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>发起方 → 接收方</th><th>方法 / 结果</th><th>state</th><th>意义</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>Codex → Surge</td><td><code>GET …/responses</code> + WebSocket Upgrade；本地 abort</td><td>通常无</td><td><code>force_http=1</code> 触发 HTTP/SSE 回退；上游不一定收到此握手</td></tr>
+        <tr><td>1</td><td>Surge → OpenAI</td><td><code>POST …/responses</code>；内部探针</td><td>响应返回 780</td><td>只在无可用缓存或临近续期时发生；正式请求在本地等待</td></tr>
+        <tr><td>1A</td><td>Surge 本地</td><td>读取探针回答；按项目规则判级</td><td>同时记录返回 state</td><td><code>iPhone 17</code> = 通过；<code>16</code>/<code>15</code>/未知 = 拒绝</td></tr>
+        <tr><td>2</td><td>Surge 本地</td><td>验证 state 外层结构与时间</td><td>质量与结构都通过才写缓存</td><td>292/312/780 只记录，不参与质量结论</td></tr>
+        <tr><td>3</td><td>Codex → OpenAI</td><td><code>POST …/responses</code>；正式生成</td><td>注入已验证缓存，或未验证放行</td><td>只使用同账号、同模型且未过期的缓存</td></tr>
+        <tr><td>4</td><td>OpenAI → Codex</td><td><code>HTTP 200</code> + SSE</td><td>例如返回 780</td><td><code>response.completed</code> 结束本次 HTTP 响应</td></tr>
+        <tr><td>5</td><td>Codex → OpenAI</td><td>可选：工具结果续传</td><td>官方客户端回送该 turn 的 state</td><td>同一个 <code>&lt;TURN_ID&gt;</code>，仍属于同一 turn</td></tr>
+        <tr><td>6</td><td>客户端本地</td><td>turn 结束</td><td>官方客户端丢弃 turn state</td><td>没有必然存在的“结束会话 HTTP 包”；连接可继续复用</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="packet-sequence">
+    <article class="packet">
+      <div class="packet-head"><strong>0 · 尝试建立 WebSocket</strong><span>Codex → Surge；CSSS 在请求阶段中止</span></div>
+      <div class="packet-grid">
+        <div class="packet-side">
+          <div class="packet-label">Request</div>
+          <pre><code>GET /backend-api/codex/responses HTTP/1.1
+Host: chatgpt.com
+Connection: Upgrade
+Upgrade: websocket
+Sec-WebSocket-Version: 13
+Sec-WebSocket-Key: &lt;RANDOM_KEY&gt;
+Authorization: Bearer &lt;ACCESS_TOKEN&gt;
+ChatGPT-Account-ID: &lt;ACCOUNT_ID&gt;
+OpenAI-Beta: &lt;COPIED_CLIENT_FEATURES&gt;
+X-Codex-Installation-ID: &lt;INSTALLATION_ID&gt;</code></pre>
+        </div>
+        <div class="packet-side">
+          <div class="packet-label">Local result — not an upstream response</div>
+          <pre><code>[Surge http-request script]
+match: /backend-api/codex/responses
+upgrade: websocket
+force_http: 1
+
+$done({abort: true})
+
+# No fabricated HTTP status.
+# Client is expected to retry over HTTP/SSE.</code></pre>
+        </div>
+      </div>
+      <p class="packet-note warn">这一步可能在 Codex 界面短暂显示 <code>WebSocket protocol error: Handshake not finished</code>。它是主动中止握手的预期副作用，不代表后面的 HTTP 回退已经成功。</p>
+    </article>
+
+    <article class="packet">
+      <div class="packet-head"><strong>1 · CSSS 先发 iPhone 质量探针</strong><span>Surge → OpenAI；正式请求暂挂在脚本回调中</span></div>
+      <div class="packet-grid">
+        <div class="packet-side">
+          <div class="packet-label">Probe request</div>
+          <pre><code>POST /backend-api/codex/responses HTTP/1.1
+Host: chatgpt.com
+Authorization: Bearer &lt;ACCESS_TOKEN&gt;
+ChatGPT-Account-ID: &lt;ACCOUNT_ID&gt;
+Originator: &lt;COPIED_ORIGINATOR&gt;
+User-Agent: &lt;COPIED_USER_AGENT&gt;
+Version: &lt;COPIED_VERSION&gt;
+OpenAI-Beta: &lt;COPIED_CLIENT_FEATURES&gt;
+X-Codex-Installation-ID: &lt;INSTALLATION_ID&gt;
+Content-Type: application/json
+Accept: text/event-stream
+Connection: close
+X-Codex-State-Probe: 1
+
+{
+  "model": "&lt;ACTUAL_MODEL&gt;",
+  "instructions": "请回答：最新的 iPhone 型号是什么，禁止联网搜索，基于已有的知识回答。",
+  "input": [{
+    "type": "message",
+    "role": "user",
+    "content": [{
+      "type": "input_text",
+      "text": "请回答：最新的 iPhone 型号是什么，禁止联网搜索，基于已有的知识回答。"
+    }]
+  }],
+  "stream": true,
+  "store": false
+}</code></pre>
+        </div>
+        <div class="packet-side">
+          <div class="packet-label">Probe response — current observation</div>
+          <pre><code>HTTP/1.1 200 OK
+Content-Type: text/event-stream
+X-Codex-Turn-State: &lt;OPAQUE_STATE_780&gt;
+
+event: response.created
+data: {"type":"response.created", ...}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta",
+       "delta":"iPhone 17 系列"}
+
+event: response.completed
+data: {"type":"response.completed", ...}</code></pre>
+        </div>
+      </div>
+      <p class="packet-note">探针复制七类身份/客户端头，但使用自己的最小请求体，并带 <code>X-Codex-State-Probe: 1</code> 防止脚本递归拦截。住宅 IP / SOCKS5 策略只作用于这个内部请求。</p>
+    </article>
+
+    <article class="packet">
+      <div class="packet-head"><strong>1A · 已实现：用 iPhone 回答直接判定质量</strong><span>项目验收规则；长度只作诊断</span></div>
+      <div class="packet-grid">
+        <div class="packet-side">
+          <div class="packet-label">Quality probe request</div>
+          <pre><code>POST /backend-api/codex/responses HTTP/1.1
+Host: chatgpt.com
+Authorization: Bearer &lt;ACCESS_TOKEN&gt;
+ChatGPT-Account-ID: &lt;ACCOUNT_ID&gt;
+X-Codex-Installation-ID: &lt;INSTALLATION_ID&gt;
+Content-Type: application/json
+Accept: text/event-stream
+Connection: close
+X-Codex-State-Probe: 1
+
+{
+  "model": "&lt;ACTUAL_MODEL&gt;",
+  "instructions": "请直接回答，不要联网搜索。",
+  "input": [{
+    "type": "message",
+    "role": "user",
+    "content": [{
+      "type": "input_text",
+      "text": "请回答：最新的 iPhone 型号是什么，禁止联网搜索，基于已有的知识回答。"
+    }]
+  }],
+  "stream": true,
+  "store": false
+}</code></pre>
+        </div>
+        <div class="packet-side">
+          <div class="packet-label">Normal-quality response example</div>
+          <pre><code>HTTP/1.1 200 OK
+Content-Type: text/event-stream
+X-Codex-Turn-State: &lt;OPAQUE_STATE_780&gt;
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta",
+       "delta":"最新的是 iPhone 17 系列。"}
+
+event: response.completed
+data: {"type":"response.completed", ...}
+
+[CSSS quality result]
+answer tier = iPhone 17
+verdict     = NORMAL
+state len   = 780
+state blocks= 33</code></pre>
+        </div>
+      </div>
+      <div class="table-wrap" style="margin: 0; padding: 0 14px 14px;">
+        <table>
+          <thead><tr><th>探针回答</th><th>项目判定</th><th>当前缓存动作</th></tr></thead>
+          <tbody>
+            <tr><td><code>iPhone 17</code></td><td><span class="status observed">正常 GPT-6</span></td><td>state 外层结构与时间有效时，作为质量通过的候选值</td></tr>
+            <tr><td><code>iPhone 16</code></td><td><span class="status inferred">GPT-5.6 Luna 降智</span></td><td>拒绝该次 state，不替换已有正常缓存</td></tr>
+            <tr><td><code>iPhone 15</code></td><td><span class="status invalidated">更严重降智</span></td><td>拒绝该次 state，不替换已有正常缓存</td></tr>
+            <tr><td>没有命中上述系列</td><td><span class="status implemented">无法判定</span></td><td>不写入质量缓存，保留原有值并等待下次探针</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="packet-note good">按本项目的验收规则，回答本身就是这一次探针是否降智的判定证据。这样即使 state 统一填充为 780，也能用回答区分本次路由质量；长度、块数和指纹退回为关联记录，不再单独决定好坏。</p>
+    </article>
+
+    <article class="packet">
+      <div class="packet-head"><strong>2 · Surge 在本地校验 state</strong><span>这是脚本计算，不会出现在 Burp HTTP history</span></div>
+      <div class="packet-grid">
+        <div class="packet-side">
+          <div class="packet-label">780 + iPhone 15</div>
+          <pre><code>answer tier   = iPhone 15
+header length= 780
+first byte   = 0x80
+time window  = VALID
+
+decision      = REJECT_QUALITY
+cache write   = NO
+formal header = NOT INJECTED</code></pre>
+        </div>
+        <div class="packet-side">
+          <div class="packet-label">780 + iPhone 17</div>
+          <pre><code>answer tier   = iPhone 17
+header length= 780
+first byte   = 0x80
+time window  = VALID
+
+decision      = ACCEPT
+cache write   = YES
+formal header = INJECT VALIDATED STATE</code></pre>
+        </div>
+      </div>
+      <p class="packet-note warn">同样是 780，回答不同会得到不同缓存结论。长度不再决定好坏；iPhone 17 是本项目的验收规则，而非服务端公开的模型身份声明。</p>
+    </article>
+
+    <article class="packet">
+      <div class="packet-head"><strong>3 · 放行正式生成请求</strong><span>Codex → Surge → OpenAI</span></div>
+      <div class="packet-grid">
+        <div class="packet-side">
+          <div class="packet-label">No validated cache — pass through</div>
+          <pre><code>POST /backend-api/codex/responses HTTP/1.1
+Host: chatgpt.com
+Authorization: Bearer &lt;ACCESS_TOKEN&gt;
+ChatGPT-Account-ID: &lt;ACCOUNT_ID&gt;
+Thread-ID: &lt;THREAD_ID&gt;
+X-Codex-Turn-Metadata: {"turn_id":"&lt;TURN_ID&gt;"}
+X-Codex-Installation-ID: &lt;INSTALLATION_ID&gt;
+Content-Type: application/json
+Accept: text/event-stream
+
+# No CSSS-injected X-Codex-Turn-State
+
+{
+  "model": "&lt;ACTUAL_MODEL&gt;",
+  "input": [&lt;USER_MESSAGE_AND_CONTEXT&gt;],
+  "stream": true,
+  ...
+}</code></pre>
+        </div>
+        <div class="packet-side">
+          <div class="packet-label">If a validated cache exists</div>
+          <pre><code>POST /backend-api/codex/responses HTTP/1.1
+Host: chatgpt.com
+Authorization: Bearer &lt;ACCESS_TOKEN&gt;
+ChatGPT-Account-ID: &lt;ACCOUNT_ID&gt;
+Thread-ID: &lt;THREAD_ID&gt;
+X-Codex-Turn-Metadata: {"turn_id":"&lt;TURN_ID&gt;"}
+X-Codex-Installation-ID: &lt;INSTALLATION_ID&gt;
+X-Codex-Turn-State: &lt;QUALITY_VALIDATED_STATE&gt;
+Content-Type: application/json
+Accept: text/event-stream
+
+{ "model": "&lt;ACTUAL_MODEL&gt;", ... }</code></pre>
+        </div>
+      </div>
+      <p class="packet-note warn"><code>setHeader()</code> 会先删除大小写不同的同名头，再写入缓存值。因此有已验证缓存时，CSSS 不只是“补缺失头”，还会覆盖客户端原本携带的同-turn state；没有可用缓存时则原样放行，不会主动删除客户端的头。</p>
+    </article>
+
+    <article class="packet">
+      <div class="packet-head"><strong>4 · 正式响应以 SSE 流返回</strong><span>OpenAI → Surge → Codex</span></div>
+      <div class="packet-grid">
+        <div class="packet-side">
+          <div class="packet-label">Response headers</div>
+          <pre><code>HTTP/1.1 200 OK
+Content-Type: text/event-stream
+X-Codex-Turn-State: &lt;OPAQUE_STATE_780&gt;
+X-Request-ID: &lt;REQUEST_ID&gt;
+Cache-Control: no-cache
+
+# Response body continues as an SSE stream.</code></pre>
+        </div>
+        <div class="packet-side">
+          <div class="packet-label">Representative SSE frames</div>
+          <pre><code>event: response.created
+data: {"type":"response.created", ...}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta",
+       "delta":"..."}
+
+event: response.completed
+data: {"type":"response.completed", ...}
+
+# End of this HTTP response body.</code></pre>
+        </div>
+      </div>
+      <p class="packet-note"><code>response.completed</code> 表示这一条 Responses 调用完成。CSSS 的响应脚本只读取响应头，不缓冲 SSE 正文；它会记录 780/33 blocks，但不会仅凭正式响应头写入质量缓存。</p>
+    </article>
+
+    <article class="packet">
+      <div class="packet-head"><strong>5 · 可选：同一 turn 内提交工具结果</strong><span>同一 &lt;TURN_ID&gt; 的下一次 Responses 请求</span></div>
+      <div class="packet-grid">
+        <div class="packet-side">
+          <div class="packet-label">Official per-turn replay</div>
+          <pre><code>POST /backend-api/codex/responses HTTP/1.1
+Host: chatgpt.com
+Thread-ID: &lt;THREAD_ID&gt;
+X-Codex-Turn-Metadata: {"turn_id":"&lt;SAME_TURN_ID&gt;"}
+X-Codex-Turn-State: &lt;STATE_FROM_THIS_TURN&gt;
+Content-Type: application/json
+Accept: text/event-stream
+
+{
+  "model": "&lt;ACTUAL_MODEL&gt;",
+  "input": [{
+    "type": "function_call_output",
+    "call_id": "&lt;CALL_ID&gt;",
+    "output": "&lt;TOOL_RESULT&gt;"
+  }],
+  "stream": true,
+  ...
+}</code></pre>
+        </div>
+        <div class="packet-side">
+          <div class="packet-label">CSSS interaction</div>
+          <pre><code>if validated cached state is usable:
+    overwrite X-Codex-Turn-State with cached state
+else:
+    preserve the client's existing header
+
+OpenAI Codex source contract:
+    same turn  -> replay exact received state
+    next turn  -> do not replay old state</code></pre>
+        </div>
+      </div>
+      <p class="packet-note danger">这里揭示了核心冲突：官方 state 是 turn-scoped；CSSS 缓存是“账号 + 模型”scoped。缓存命中时，它可能用跨 turn 的已验证旧 state 覆盖本轮客户端刚获得的 state。</p>
+    </article>
+
+    <article class="packet">
+      <div class="packet-head"><strong>6 · turn 结束与下一 turn</strong><span>结束信号在 SSE；传输连接不一定关闭</span></div>
+      <div class="packet-grid">
+        <div class="packet-side">
+          <div class="packet-label">End of current turn</div>
+          <pre><code>event: response.completed
+data: {"type":"response.completed", ...}
+
+[official client]
+destroy ModelClientSession for &lt;TURN_ID&gt;
+drop &lt;STATE_FROM_THIS_TURN&gt;
+
+[transport]
+HTTP/TLS connection may remain pooled
+WebSocket would use a Close frame if closed
+No mandatory "end conversation" request exists</code></pre>
+        </div>
+        <div class="packet-side">
+          <div class="packet-label">Next user message</div>
+          <pre><code>POST /backend-api/codex/responses HTTP/1.1
+Host: chatgpt.com
+Thread-ID: &lt;SAME_OR_NEW_THREAD_ID&gt;
+X-Codex-Turn-Metadata: {"turn_id":"&lt;NEW_TURN_ID&gt;"}
+
+# Official behavior:
+# no state from the previous turn
+
+# CSSS experimental behavior when cache is valid:
+X-Codex-Turn-State: &lt;CACHED_VALIDATED_STATE&gt;</code></pre>
+        </div>
+      </div>
+      <p class="packet-note good">判断一次完整 turn 是否结束，应看最终 <code>response.completed</code>（以及工具循环是否还有后续请求），不能把 TCP 断开、WebSocket 重连、关闭 UI 或 thread-id 变化当成同一件事。</p>
+    </article>
+  </div>
+
+  <div class="callout good">
+    <strong>当前 780 情况的一句话结论</strong>
+    当前脚本看到 <code>HTTP 200 + state 780</code> 时，会继续检查同一隐藏探针的完整回答。回答 <code>iPhone 17</code> 且 state 结构与时间有效时缓存；回答 <code>iPhone 16/15</code> 或无法判定时拒绝。该逻辑已经自动执行。
+  </div>
+
+  <h2>Code Sources Used</h2>
+  <ul class="sources">
+    <li><code>codex-state.js</code>：参数解析、state 外层解析、缓存、探针、注入、429 与面板（重点：1–4、23–119、130–215、310–675）。</li>
+    <li><code>codex-state.sgmodule</code>：MITM、三类脚本、匹配范围、超时、引擎与面板声明。</li>
+    <li><code>test-codex-state.js</code>：state 外层解析、iPhone 档位、续期、路由、429 与面板的可执行自检。</li>
+    <li><code>README.md</code> 与 <code>AGENT_PROMPT.md</code>：设计意图、配置教程与公开声明。</li>
+    <li><a href="https://github.com/openai/codex/blob/da20788df913189878ebca7f4963d8a363ee6bf2/codex-rs/core/src/client.rs">OpenAI Codex client.rs</a>：turn-state 的单 turn 生命周期与粘性路由语义。</li>
+    <li><a href="https://manual.nssurge.com/scripting/http-request.html">Surge HTTP Request Script</a>、<a href="https://manual.nssurge.com/scripting/http-response.html">HTTP Response Script</a>、<a href="https://manual.nssurge.com/scripting/api.html">JavaScript API</a>：正文缓冲、<code>$httpClient</code>、持久化与脚本边界。</li>
+    <li><a href="https://blog.caowo.de/posts/chatgpt-codex-292-state-anti-degradation-2026/">最初的 292 State 文章</a>：原始假设、黑盒观察及作者注明的时效性限制。</li>
+    <li><a href="https://github.com/gylive/ccodex-sleep-state">gylive/ccodex-sleep-state</a>：社区实现当前采用的 10/12 块经验规则与“不保证质量改善”的边界。</li>
+  </ul>
+
+  <footer>
+    本文基于 2026-09-24 的本地代码、脱敏运行记录和公开源码。未包含账号、代理凭据、节点名称、完整 state、请求正文或个人信息。
+  </footer>
+</main>
+</body>
+</html>
